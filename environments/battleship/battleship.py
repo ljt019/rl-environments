@@ -1,9 +1,14 @@
+import os
 import re
+import sys
 from typing import Tuple
 
 import verifiers as vf
-from battleship_emulator import BattleshipEmulator
 from verifiers.types import Messages, State
+
+# Add current directory to path for imports
+sys.path.append(os.path.dirname(__file__))
+from emulator import BattleshipEmulator
 
 BATTLESHIP_SYSTEM_PROMPT = """
 You are playing Battleship.
@@ -315,7 +320,7 @@ class BattleshipEnv(vf.MultiTurnEnv):
         # Restore ships
         emulator.ships = []
         for ship_dict in emulator_dict["ships"]:
-            from battleship_emulator.models import ShipStatus
+            from models import ShipStatus
 
             ship = ShipStatus(
                 name=ship_dict["name"],

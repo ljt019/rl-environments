@@ -1,7 +1,7 @@
 [project]
-name = "wiki-race"
-description = "Environment for the game Wiki Race"
-tags = ["game", "single-turn"]
+name = "battleship"
+description = "Environment for the classic game Battleship"
+tags = ["game", "multi-turn"]
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -13,4 +13,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = ["wiki_race.py"]
+include = ["battleship.py", "models.py", "emulator.py"]
