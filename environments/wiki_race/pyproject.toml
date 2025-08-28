@@ -1,11 +1,12 @@
 [project]
 name = "wiki-race"
 description = "Environment for the game Wiki Race"
-tags = ["game", "single-turn"]
+tags = ["game", "multi-turn"]
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "verifiers>=0.1.2.post0",
+    "requests>=2.25.0",
 ]
 
 [build-system]
