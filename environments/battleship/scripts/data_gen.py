@@ -1,9 +1,23 @@
+# /// script
+# dependencies = [
+#   "datasets",
+#   "huggingface-hub",
+#   "dotenv",
+#   "openai",
+#   "verifiers",
+# ]
+# ///
+
 import os
+import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
+# Add parent directory to path so we can import battleship
+sys.path.append(str(Path(__file__).parent.parent))
+
+from battleship import load_environment
+from dotenv import load_dotenv  # type: ignore
 from openai import OpenAI
-
-from environments.battleship.battleship import load_environment
 
 ################ Data Gen Config #################
 
@@ -19,13 +33,15 @@ MAX_CONCURRENT = 10
 MIN_SCORE_THRESHOLD = 0.0
 DATASET_HUB_NAME = "ljt019/battleship-testy"
 
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
 ##################################################
 
 load_dotenv()
 
 # Get required environment variables
 api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-base_url = os.getenv("OPENAI_BASE_URL")
+base_url = os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY or OPENROUTER_API_KEY must be set")
@@ -58,7 +74,28 @@ for i in range(len(results.completion)):
         results.state[i] = updated_state
 
 
-# filter to just prompt, completion, answer, reward >= MIN_SCORE_THRESHOLD, ignoring the other columns
-env.make_dataset(results).select_columns(["prompt", "completion", "answer", "reward", "task"]).filter(
-    lambda x: x["reward"] >= MIN_SCORE_THRESHOLD
-).push_to_hub(DATASET_HUB_NAME)
+# Create custom dataset with only prompt, completion, reward, and info columns
+from datasets import Dataset
+
+dataset_rows = []
+base_dataset = env.make_dataset(results)
+
+for i, row in enumerate(base_dataset):
+    if row["reward"] >= MIN_SCORE_THRESHOLD:
+        # Extract game state information for info column
+        state = results.state[i] if i < len(results.state) else {}
+        emulator_state = state.get("emulator_state", {})
+
+        # Build info dictionary with actual underlying data
+        info = {
+            "turn": state.get("turn", 0),
+            "victory": state.get("victory", False),
+            "emulator_state": emulator_state,  # Full emulator state for reward functions
+        }
+
+        dataset_row = {"prompt": row["prompt"], "completion": row["completion"], "reward": row["reward"], "info": info}
+        dataset_rows.append(dataset_row)
+
+# Create and push dataset
+filtered_dataset = Dataset.from_list(dataset_rows)
+filtered_dataset.push_to_hub(DATASET_HUB_NAME)
