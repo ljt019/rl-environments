@@ -16,6 +16,9 @@ model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 
 args = vf.grpo_defaults(run_name=RUN_NAME)
 
+# Battleship prompts are longer due to game instructions
+args.max_prompt_length = 2048
+
 trainer = vf.GRPOTrainer(
     model=model,
     processing_class=tokenizer,
