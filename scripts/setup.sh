@@ -13,23 +13,10 @@ log_info() {
 main() {
     log_info "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    
-    log_info "Installing Rust and Cargo..."
-    if ! command -v cargo &> /dev/null; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source ~/.cargo/env
-    else
-        log_info "Rust and Cargo are already installed"
-    fi
 
     log_info "Sourcing uv environment..."
     if ! command -v uv &> /dev/null; then
         source $HOME/.local/bin/env
-    fi
-
-    log_info "Sourcing Rust environment..."
-    if [ -f ~/.cargo/env ]; then
-        source ~/.cargo/env
     fi
 
     log_info "Installing verifiers and flash-attn..."
