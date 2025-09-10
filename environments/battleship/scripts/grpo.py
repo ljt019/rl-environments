@@ -10,14 +10,15 @@ RUN_NAME = "battleship-grpo-090925"
 
 #############################################
 
-env = load_environment()
+env = load_environment(max_turns=40)
 
 model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 
 args = vf.grpo_defaults(run_name=RUN_NAME)
 
-# Battleship prompts are longer due to game instructions
+# Battleship games are longer than average, increase max prompt length and timeout
 args.max_prompt_length = 2048
+args.async_generation_timeout = 1200.0
 
 trainer = vf.GRPOTrainer(
     model=model,
