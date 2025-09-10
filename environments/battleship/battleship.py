@@ -3,7 +3,9 @@ from typing import Optional, Tuple
 
 import verifiers as vf
 from datasets import Dataset
-from emulator import (
+from verifiers.types import Messages, State
+
+from .emulator import (
     BOARD_SIZE,
     SHIPS,
     BattleshipEmulator,
@@ -11,7 +13,6 @@ from emulator import (
     GameState,
     MoveOutcome,
 )
-from verifiers.types import Messages, State
 
 BATTLESHIP_SYSTEM_PROMPT = """
 You are playing Battleship.
