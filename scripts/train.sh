@@ -30,7 +30,7 @@ main() {
     # Add the project root to PYTHONPATH so imports work
     export PYTHONPATH="${PWD}:${PYTHONPATH}"
     
-    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} accelerate launch \
+    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} uv run accelerate launch \
         --config-file configs/zero3.yaml \
         --num-processes ${NUM_PROCESSES} \
         "${SCRIPT_PATH}"
