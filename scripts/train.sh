@@ -27,6 +27,9 @@ main() {
     echo "Running training with ${NUM_PROCESSES} processes on devices: ${CUDA_VISIBLE_DEVICES}"
     echo "Script: ${SCRIPT_PATH}"
     
+    # Add the project root to PYTHONPATH so imports work
+    export PYTHONPATH="${PWD}:${PYTHONPATH}"
+    
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} accelerate launch \
         --config-file configs/zero3.yaml \
         --num-processes ${NUM_PROCESSES} \
