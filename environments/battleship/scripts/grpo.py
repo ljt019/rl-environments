@@ -18,6 +18,7 @@ args = vf.grpo_defaults(run_name=RUN_NAME)
 # Battleship games are longer than average, increase max prompt length and timeout
 args.max_prompt_length = 2048
 args.async_generation_timeout = 1200.0
+args.max_tokens = 2048
 
 trainer = vf.GRPOTrainer(
     model=model,

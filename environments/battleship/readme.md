@@ -20,7 +20,7 @@
 
 Models receive:
 1. Current game state with XML tags showing results, remaining ships, hit/miss/sunk status
-2. Visual grid representation (10x10 board)
+2. Visual grid board representation (10x10 board)
 3. Ship fleet: Carrier(5), Battleship(4), Cruiser(3), Submarine(3), Destroyer(2)
 
 Models must respond with: `<guess>COORDINATE</guess>` using format like `a1`, `e5`, `j10`.

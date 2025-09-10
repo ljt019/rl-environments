@@ -22,11 +22,10 @@ After every turn, the environment sends ONE user message containing the current 
 
 <result move="c3" value="hit|miss|sunk|invalid|victory"/>
 <remaining carrier="N" battleship="N" cruiser="N" submarine="N" destroyer="N"/>
-<state hits="a5 e4" misses="b1 d6" sunk="d5 e5" unknown="83"/>
-<grid>
+<board>
 (? unknown, o miss, x hit, s sunk)
 10x10 grid representing current board state
-</grid>
+</board>
 
 Make your move in this format:
 
@@ -40,25 +39,23 @@ Goal
 Coordinate format
   - Column letters (a-j) + row numbers (1-10), e.g., e5.
 
-Symbols in <grid>
+Symbols in <board>
   ? unknown   o miss   x hit (unsunk)   s sunk-ship part
 
 Per-turn tags (sent each turn)
   - <result move="c3" value="hit|miss|sunk|invalid|victory"/> outcome of your last shot
   - <remaining carrier="…" …/> ships still afloat
-  - <state hits="…" misses="…" sunk="…" unknown="N"/> status of guessed cells
-  - <grid> header line + 10 rows </grid> current board representation
+  - <board> header line + 10 rows </board> current board representation
 
 Ship sizes
   Carrier (5) • Battleship (4) • Cruiser (3) • Submarine (3) • Destroyer (2)
 
 Important rules
-  - NEVER guess a cell that isn't marked "?" (unknown) on the grid.
+  - NEVER guess a cell that isn't marked "?" (unknown) on the board.
   - Guessing previously guessed cells (marked o, x, or s) is invalid.
 
 <remaining carrier="1" battleship="1" cruiser="1" submarine="1" destroyer="1" />
-<state hits="" misses="" sunk="" unknown="100"/>
-<grid>
+<board>
    a b c d e f g h i j
  1 ? ? ? ? ? ? ? ? ? ?
  2 ? ? ? ? ? ? ? ? ? ?
@@ -70,7 +67,7 @@ Important rules
  8 ? ? ? ? ? ? ? ? ? ?
  9 ? ? ? ? ? ? ? ? ? ?
 10 ? ? ? ? ? ? ? ? ? ?
-</grid>
+</board>
 
 Next move:
 """
@@ -282,19 +279,6 @@ class BattleshipEnv(vf.MultiTurnEnv):
                     remaining_counts[ship_key] = 1
 
         board = game_state.board
-        hits = []
-        misses = []
-        sunk_cells = []
-
-        for pos, val in board.cells.items():
-            if val == "x":
-                hits.append(pos)
-            elif val == "o":
-                misses.append(pos)
-            elif val == "s":
-                sunk_cells.append(pos)
-
-        unknown_count = len(board.unknown_cells)
 
         cols = "abcdefghij"[:BOARD_SIZE]
         grid_lines = [f"   {' '.join(cols)}"]
@@ -310,8 +294,7 @@ class BattleshipEnv(vf.MultiTurnEnv):
         # Build response
         result = f'<result move="{outcome.move}" value="{result_value}"/>\n'
         result += f'<remaining carrier="{remaining_counts.get("carrier", 0)}" battleship="{remaining_counts.get("battleship", 0)}" cruiser="{remaining_counts.get("cruiser", 0)}" submarine="{remaining_counts.get("submarine", 0)}" destroyer="{remaining_counts.get("destroyer", 0)}" />\n'
-        result += f'<state hits="{" ".join(sorted(hits))}" misses="{" ".join(sorted(misses))}" sunk="{" ".join(sorted(sunk_cells))}" unknown="{unknown_count}"/>\n'
-        result += f"<grid>\n{grid_content}\n</grid>\n"
+        result += f"<board>\n{grid_content}\n</board>\n"
 
         if not game_state.game_over:
             result += "\nNext move:"
