@@ -1,6 +1,6 @@
 import verifiers as vf
 
-from environments.rust_cargo.rust_cargo import load_environment
+from environments.battleship.battleship import load_environment
 
 ############## Training Config ##############
 
