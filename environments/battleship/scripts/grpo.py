@@ -19,6 +19,7 @@ args = vf.grpo_defaults(run_name=RUN_NAME)
 args.max_prompt_length = 2048
 args.async_generation_timeout = 1200.0
 args.max_tokens = 1024  # MUST be small to fit in 40960 context limit
+args.max_seq_len = 43_008  # Large enough for long battleship games (prompt + completion)
 
 print(f"DEBUG: args.max_tokens = {args.max_tokens}")
 print(f"DEBUG: args.max_seq_len = {args.max_seq_len}")
