@@ -191,6 +191,7 @@ def load_environment(
             parser.get_format_reward_func(),
         ],
         weights=[0.6, 0.4, 0.5, 0.3, 0.2],
+        parser=parser,
     )
 
     return BattleshipEnv(
