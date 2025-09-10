@@ -1,8 +1,9 @@
 import random
 from typing import Optional, Tuple
 
-import verifiers as vf
 from datasets import Dataset
+
+import verifiers as vf
 from verifiers.types import Messages, State
 
 from .emulator import (

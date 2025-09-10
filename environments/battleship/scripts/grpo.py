@@ -1,10 +1,9 @@
 import verifiers as vf
-
 from environments.battleship.battleship import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "Qwen/Qwen3-1.7B"
+MODEL_NAME = "willcb/Qwen3-1.7B"
 
 RUN_NAME = "battleship-grpo-090925"
 

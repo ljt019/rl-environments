@@ -2,7 +2,7 @@
 
 ############## vLLM Config ##############
 
-MODEL_NAME="Qwen/Qwen3-1.7B"
+MODEL_NAME="willcb/Qwen3-1.7B"
 CUDA_VISIBLE_DEVICES="0"
 
 ##############################################
