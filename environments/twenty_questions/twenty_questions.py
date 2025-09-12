@@ -1,5 +1,4 @@
 import logging
-import random
 from typing import Tuple
 
 from openai import AsyncOpenAI
@@ -8,18 +7,23 @@ import verifiers as vf
 from verifiers.types import Messages, State
 
 ANSWERER_SYSTEM_PROMPT = """
-You are the ANSWERER in twenty questions. You know the answer word/object that the questioner is trying to guess.
+You are playing twenty questions. You are the player who comes up with the thing to be guessed, and you chose: {answer}
 
-Rules:
-1. Answer only "Yes", "No", or "I don't know" to questions
-2. Be consistent with your answers
-3. If asked to guess or for the answer directly, remind them to ask yes/no questions
-4. Keep track of the answer you're thinking of throughout the conversation
+The other player is trying to guess {answer} based on your answers to their yes/no questions.
 
-The answer word/object is: {answer}
+YOUR JOB: Answer their questions about "{answer}" with Yes, No, or I don't know.
 
-Respond only with "Yes", "No", or "I don't know" unless the question is not a yes/no question.
+Do not overthink - just answer the question about {answer}
+
+Format your response using XML tags:
+<answer>Yes</answer>
+<answer>No</answer>  
+<answer>I don't know</answer>
+
+Example: If asked "Is it alive?" and you're thinking of "dog", respond: <answer>Yes</answer>
 """
+
+ANSWERER_USER_PROMPT = "{question}"
 
 QUESTIONER_SYSTEM_PROMPT = """
 You are playing twenty questions. Try to guess what the user is thinking of by asking yes or no questions. You have up to 20 questions, but may make your guess early if you wish. 
@@ -39,18 +43,13 @@ When you're ready to make a final guess, use:
 Your final answer here
 </guess>
 
-Always use either <question> or <guess>, never both in the same response.
+CRITICAL: 
+- Always use either <question> or <guess>, never both in the same response.
+- You MUST use proper XML formatting with both opening AND closing tags. Your response will fail to parse if tags are not properly closed.
 """
 
 WINNING_MESSAGE = "Yes! The answer was '{answer}'. You got it!"
-MAX_QUESTIONS_MESSAGE = " That was question {max_questions}. The answer was '{answer}'!"
-
-ANSWERER_USER_PROMPT = """Conversation so far:
-{context}
-
-The human just asked: "{question}"
-
-Please respond with only "Yes", "No", or "I don't know" based on the answer word '{answer}'. Be helpful but stick to yes/no answers."""
+MAX_QUESTIONS_MESSAGE = "No! The answer was '{answer}'. You lost!"
 
 
 class TwentyQuestionsEnv(vf.MultiTurnEnv):
@@ -67,7 +66,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         answerer_model: str,
         **kwargs,
     ):
-        super().__init__(max_turns=20, **kwargs)
+        super().__init__(max_turns=21, **kwargs)  # 20 questions + 1 final guess
 
         self.answerer_client = answerer_client
         self.answerer_model = answerer_model
@@ -75,27 +74,26 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
         self.answerer_system_prompt = ANSWERER_SYSTEM_PROMPT
 
-        self.answers = None
+        self.answerer_parser = vf.XMLParser(
+            fields=["answer"],
+            answer_field="answer",
+        )
 
         self.logger = logging.getLogger(f"verifiers.envs.{self.__class__.__name__}")
 
     async def setup_state(self, state: State, **kwargs) -> State:
-        """Initialize game state with a random answer."""
-        if self.answers is None:
-            self.answers = list(set(self.dataset["answer"]))
-
-        answer = random.choice(self.answers)
-        state["answer"] = answer
+        """Initialize game state with the answer from the current dataset row."""
         state["questions_asked"] = 0
         state["game_over"] = False
+        state["final_message_sent"] = False
         return state
 
     async def is_completed(self, messages: Messages, state: State, **kwargs) -> bool:
-        """Game is complete after 20 questions or if game_over flag is set."""
-        questions_asked = state.get("questions_asked", 0)
+        """Game is complete after final message has been sent."""
         game_over = state.get("game_over", False)
+        final_message_sent = state.get("final_message_sent", False)
 
-        return game_over or questions_asked >= 20
+        return game_over and final_message_sent
 
     async def env_response(self, messages: Messages, state: State, **kwargs) -> Tuple[Messages, State]:
         """
@@ -114,19 +112,58 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             answer_lower = answer.lower()
 
             state["questions_asked"] = questions_asked + 1
-            state["final_guess"] = guess
 
-            if guess == answer_lower or answer_lower in guess:
+            is_correct = False
+
+            if guess == answer_lower:
+                is_correct = True
+            else:
+                validation_prompt = [
+                    {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
+                    {
+                        "role": "user",
+                        "content": f'The player guessed: "{parsed.guess}". Is this guess correct for what you\'re thinking of?',
+                    },
+                ]
+
+                validation_response = await self.get_model_response(
+                    client=self.answerer_client,
+                    model=self.answerer_model,
+                    prompt=validation_prompt,
+                    sampling_args=self.answerer_sampling_args,
+                    message_type="chat",
+                )
+
+                raw_validation = validation_response.choices[0].message.content or ""
+
+                parsed_validation = self.answerer_parser.parse(raw_validation)
+                if hasattr(parsed_validation, "answer") and parsed_validation.answer:
+                    validation_text = parsed_validation.answer.strip().lower()
+                    is_correct = validation_text.startswith("yes")
+                else:
+                    # Try appending </answer> and parsing again
+                    fixed_validation = raw_validation + "</answer>"
+                    parsed_validation_fixed = self.answerer_parser.parse(fixed_validation)
+
+                    if hasattr(parsed_validation_fixed, "answer") and parsed_validation_fixed.answer:
+                        validation_text = parsed_validation_fixed.answer.strip().lower()
+                        is_correct = validation_text.startswith("yes")
+                    else:
+                        raise ValueError(f"Could not extract answer from validation response: {repr(raw_validation)}")
+
+            if is_correct:
                 state["game_won"] = True
                 state["game_over"] = True
+                state["final_message_sent"] = True
                 return [{"role": "user", "content": WINNING_MESSAGE.format(answer=answer)}], state
             else:
                 if state["questions_asked"] >= 20:
                     state["game_over"] = True
+                    state["final_message_sent"] = True
                     return [
                         {
                             "role": "user",
-                            "content": f"No, that's not correct. {MAX_QUESTIONS_MESSAGE.format(max_questions=20, answer=answer)}",
+                            "content": MAX_QUESTIONS_MESSAGE.format(answer=answer),
                         }
                     ], state
                 else:
@@ -137,27 +174,23 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                         }
                     ], state
 
-        if hasattr(parsed, "question") and parsed.question:
+        if not hasattr(parsed, "question") or parsed.question is None:
+            # Try appending </question> and parsing again
+            fixed_content = last_message_content + "</question>"
+            parsed_fixed = self.parser.parse(fixed_content)
+
+            if hasattr(parsed_fixed, "question") and parsed_fixed.question is not None:
+                question = parsed_fixed.question.strip()
+            else:
+                raise ValueError(f"Could not extract question from model response: {repr(last_message_content)}")
+        else:
             question = parsed.question.strip()
-        else:
-            question = last_message_content
-
-        conversation_context = []
-        if len(messages) > 6:
-            conversation_context = messages[-6:]
-        else:
-            conversation_context = messages
-
-        context_str = ""
-        for msg in conversation_context:
-            role = "Human" if msg["role"] == "assistant" else "Environment"
-            context_str += f"{role}: {msg['content']}\n"
 
         answerer_prompt = [
             {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
             {
                 "role": "user",
-                "content": ANSWERER_USER_PROMPT.format(context=context_str, question=question, answer=answer),
+                "content": ANSWERER_USER_PROMPT.format(question=question),
             },
         ]
 
@@ -169,16 +202,31 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             message_type="chat",
         )
 
-        env_response_text = response.choices[0].message.content or "I don't know"
+        raw_response = response.choices[0].message.content or ""
+
+        parsed_answer = self.answerer_parser.parse(raw_response)
+
+        if hasattr(parsed_answer, "answer") and parsed_answer.answer:
+            env_response_text = parsed_answer.answer.strip()
+        else:
+            # Try appending </answer> and parsing again
+            fixed_response = raw_response + "</answer>"
+            parsed_answer_fixed = self.answerer_parser.parse(fixed_response)
+
+            if hasattr(parsed_answer_fixed, "answer") and parsed_answer_fixed.answer:
+                env_response_text = parsed_answer_fixed.answer.strip()
+            else:
+                raise ValueError(f"Could not extract answer from answerer response: {repr(raw_response)}")
 
         state["questions_asked"] = questions_asked + 1
 
-        if state["questions_asked"] >= 20:
-            env_response_text += MAX_QUESTIONS_MESSAGE.format(max_questions=20, answer=answer)
-            state["game_over"] = True
-            state["game_won"] = False
+        remaining_questions = 20 - state["questions_asked"]
+        formatted_response = f"{env_response_text}\nYou have {remaining_questions} questions left."
 
-        return [{"role": "user", "content": env_response_text}], state
+        if state["questions_asked"] == 20:
+            formatted_response = "You've used all 20 questions. Please make your final guess, what am I thinking of?"
+
+        return [{"role": "user", "content": formatted_response}], state
 
 
 def load_environment(
@@ -222,11 +270,11 @@ def load_environment(
         answer_field="guess",
     )
 
-    def victory_reward(state: State) -> float:
+    def victory_reward(state, **kwargs) -> float:
         """Reward for successfully guessing the answer."""
         return 1.0 if state.get("game_won", False) else 0.0
 
-    def efficiency_reward(state: State) -> float:
+    def efficiency_reward(state, **kwargs) -> float:
         """Reward for guessing with fewer questions (efficiency bonus)."""
         if not state.get("game_won", False):
             return 0.0

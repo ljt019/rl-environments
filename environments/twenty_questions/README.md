@@ -1,5 +1,7 @@
 # Twenty Questions
 
+> ⚠️ **Work in Progress**: This environment is currently under active development and may have breaking changes or unexpected behavior.
+
 ### Overview
 - **Environment ID**: `twenty-questions`
 - **Short description**: Multi-turn game where models try to guess a secret word/object by asking strategic yes/no questions within 20 turns.
