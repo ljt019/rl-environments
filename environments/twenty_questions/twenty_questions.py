@@ -29,19 +29,19 @@ QUESTIONER_SYSTEM_PROMPT = """
 You are playing twenty questions. Try to guess what the user is thinking of by asking yes or no questions. You have up to 20 questions, but may make your guess early if you wish. 
 If you make your guess early, it will count as one of your 20 questions, so guess wisely!
 
-Format your responses as:
-<think>
-Your reasoning about what to ask next or what you think the answer might be.
-</think>
+Format your responses using XML tags:
 
+For questions:
 <question>
 Your yes/no question here
 </question>
 
-When you're ready to make a final guess, use:
+To make a guess at any time use:
 <guess>
-Your final answer here
+Your guess here
 </guess>
+
+Remember that early guesses cost you one of your questions, but after your 20th question you will be allowed a final guess.
 
 CRITICAL: 
 - Always use either <question> or <guess>, never both in the same response.
@@ -146,7 +146,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                     is_correct = validation_text.startswith("yes")
                 else:
                     # Try appending </answer> and parsing again
-                    fixed_validation = raw_validation + "</answer>"
+                    fixed_validation = raw_validation + "\n</answer>"
                     parsed_validation_fixed = self.answerer_parser.parse(fixed_validation)
 
                     if hasattr(parsed_validation_fixed, "answer") and parsed_validation_fixed.answer:
@@ -178,7 +178,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
         if not hasattr(parsed, "question") or parsed.question is None:
             # Try appending </question> and parsing again
-            fixed_content = last_message_content + "</question>"
+            fixed_content = last_message_content + "\n</question>"
             parsed_fixed = self.parser.parse(fixed_content)
 
             if hasattr(parsed_fixed, "question") and parsed_fixed.question is not None:
@@ -212,7 +212,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             env_response_text = parsed_answer.answer.strip()
         else:
             # Try appending </answer> and parsing again
-            fixed_response = raw_response + "</answer>"
+            fixed_response = raw_response + "\n</answer>"
             parsed_answer_fixed = self.answerer_parser.parse(fixed_response)
 
             if hasattr(parsed_answer_fixed, "answer") and parsed_answer_fixed.answer:
