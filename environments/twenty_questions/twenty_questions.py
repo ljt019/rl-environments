@@ -100,6 +100,10 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         Generate environment response using external LLM.
         The LLM knows the answer and answers yes/no questions or handles guesses.
         """
+        if state.get("final_message_sent", False):
+            state["game_over"] = True
+            return [], state
+
         answer = state["answer"]
         questions_asked = state["questions_asked"]
 
@@ -153,12 +157,10 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
             if is_correct:
                 state["game_won"] = True
-                state["game_over"] = True
                 state["final_message_sent"] = True
                 return [{"role": "user", "content": WINNING_MESSAGE.format(answer=answer)}], state
             else:
                 if state["questions_asked"] >= 20:
-                    state["game_over"] = True
                     state["final_message_sent"] = True
                     return [
                         {
