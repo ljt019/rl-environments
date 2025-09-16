@@ -1485,7 +1485,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "verifiers", specifier = ">=0.1.3" }]
+requires-dist = [{ name = "verifiers", specifier = ">=0.1.3.post0" }]
 
 [[package]]
 name = "types-requests"

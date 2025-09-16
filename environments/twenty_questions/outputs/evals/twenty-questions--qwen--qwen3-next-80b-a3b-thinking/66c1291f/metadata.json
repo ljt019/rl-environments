@@ -1,0 +1,1 @@
+{"env": "twenty-questions", "model": "qwen/qwen3-next-80b-a3b-thinking", "num_examples": 5, "rollouts_per_example": 3, "sampling_args": {"max_tokens": null}, "date": "2025-09-11", "time": "21:15:28", "avg_reward": 0.31961904761904764, "avg_victory_reward": 0.13333333333333333, "avg_efficiency_reward": 0.013333333333333332, "avg_format_reward_func": 0.5987301587301589}

@@ -1,0 +1,1 @@
+{"env": "twenty-questions", "model": "deepseek/deepseek-r1-0528", "num_examples": 5, "rollouts_per_example": 3, "sampling_args": {"max_tokens": null}, "date": "2025-09-11", "time": "21:49:23", "avg_reward": 0.3192190476190477, "avg_victory_reward": 0.13333333333333333, "avg_efficiency_reward": 0.013333333333333332, "avg_format_reward_func": 0.5973968253968255}

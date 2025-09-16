@@ -1,0 +1,1 @@
+{"env": "twenty-questions", "model": "openai/gpt-5-mini", "num_examples": 5, "rollouts_per_example": 3, "sampling_args": {"max_tokens": null}, "date": "2025-09-12", "time": "01:54:06", "avg_reward": 0.5635434675427622, "avg_victory_reward": 0.26666666666666666, "avg_efficiency_reward": 0.01, "avg_format_reward_func": 0.9729226695869851}

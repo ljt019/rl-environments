@@ -1,10 +1,21 @@
 import logging
 from typing import Tuple
 
+import httpx
 from openai import AsyncOpenAI
 
 import verifiers as vf
 from verifiers.types import Messages, State
+
+
+def setup_client(
+    api_base_url, api_key, timeout=600.0, max_connections=100, max_keepalive_connections=50, max_retries=3
+):
+    timeout_obj = httpx.Timeout(timeout, connect=5.0)
+    limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive_connections)
+    http_client = httpx.AsyncClient(limits=limits, timeout=timeout_obj)
+    return AsyncOpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
+
 
 ANSWERER_SYSTEM_PROMPT = """
 You are playing twenty questions. You are the player who comes up with the thing to be guessed, and you chose: {answer}
@@ -15,37 +26,28 @@ YOUR JOB: Answer their questions about "{answer}" with Yes, No, or I don't know.
 
 Do not overthink - just answer the question about {answer}
 
-Format your response using XML tags:
-<answer>Yes</answer>
-<answer>No</answer>  
-<answer>I don't know</answer>
+Expected format:
+{format_str}
 
-Example: If asked "Is it alive?" and you're thinking of "dog", respond: <answer>Yes</answer>
+Examples: <answer>Yes</answer> or <answer>No</answer> or <answer>I don't know</answer>
 """
 
 ANSWERER_USER_PROMPT = "{question}"
 
 QUESTIONER_SYSTEM_PROMPT = """
 You are playing twenty questions. Try to guess what the user is thinking of by asking yes or no questions. You have up to 20 questions, but may make your guess early if you wish. 
-If you make your guess early, it will count as one of your 20 questions, so guess wisely!
+If you make your guess early, it will count as one of your questions, so guess wisely!
 
-Format your responses using XML tags:
-
-For questions:
-<question>
-Your yes/no question here
-</question>
-
-To make a guess at any time use:
-<guess>
-Your guess here
-</guess>
+Use <think> tags to show your reasoning, then either <question> for yes/no questions or <guess> for your final answer.
 
 Remember that early guesses cost you one of your questions, but after your 20th question you will be allowed a final guess.
 
 CRITICAL: 
 - Always use either <question> or <guess>, never both in the same response.
-- You MUST use proper XML formatting with both opening AND closing tags. Your response will fail to parse if tags are not properly closed.
+- You MUST use proper XML formatting with both opening AND closing tags.
+
+Expected format:
+{format_str}
 """
 
 WINNING_MESSAGE = "Yes! The answer was '{answer}'. You got it!"
@@ -66,17 +68,20 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         answerer_model: str,
         **kwargs,
     ):
-        super().__init__(max_turns=21, **kwargs)  # 20 questions + 1 final guess
+        super().__init__(max_turns=-1, **kwargs)
 
         self.answerer_client = answerer_client
         self.answerer_model = answerer_model
         self.answerer_sampling_args = {"temperature": 0.3}
 
-        self.answerer_system_prompt = ANSWERER_SYSTEM_PROMPT
-
         self.answerer_parser = vf.XMLParser(
             fields=["answer"],
             answer_field="answer",
+        )
+
+        self.answerer_system_prompt = ANSWERER_SYSTEM_PROMPT.format(
+            answer="{answer}",
+            format_str=self.answerer_parser.get_format_str(),
         )
 
         self.logger = logging.getLogger(f"verifiers.envs.{self.__class__.__name__}")
@@ -111,11 +116,19 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
         parsed = self.parser.parse(last_message_content)
 
+        if not parsed or (
+            not (hasattr(parsed, "guess") and parsed.guess) and not (hasattr(parsed, "question") and parsed.question)
+        ):
+            return [
+                {
+                    "role": "user",
+                    "content": f"Please format your response properly using the required XML tags. Expected format:\n{self.parser.get_format_str()}",
+                }
+            ], state
+
         if hasattr(parsed, "guess") and parsed.guess:
             guess = parsed.guess.strip().lower()
             answer_lower = answer.lower()
-
-            state["questions_asked"] = questions_asked + 1
 
             is_correct = False
 
@@ -126,41 +139,54 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                     {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
                     {
                         "role": "user",
-                        "content": f'The player guessed: "{parsed.guess}". Is this guess correct for what you\'re thinking of?',
+                        "content": f'The player guessed: "{parsed.guess}". Is this guess EXACTLY correct for what you\'re thinking of?\n\nOnly answer "Yes" if the guess is essentially the same as "{answer}" - either exact match or very close synonym.\n\nEXAMPLES:\n✅ ACCEPT: "Gobi Desert" for "Gobi Desert", "Great Pyramid of Giza" for "Pyramids of Giza", "chips and cheese" for "nachos"\n❌ REJECT: "desert" for "Gobi Desert", "pyramid" for "Great Pyramid", "food" for "nachos", "car" for "Toyota Camry"\n\nPartial matches, general categories, and broader types are NOT correct - the guess must specifically identify "{answer}".',
                     },
                 ]
 
-                validation_response = await self.get_model_response(
-                    client=self.answerer_client,
-                    model=self.answerer_model,
-                    prompt=validation_prompt,
-                    sampling_args=self.answerer_sampling_args,
-                    message_type="chat",
-                )
+                is_correct = False
+                for attempt in range(3):
+                    try:
+                        validation_response = await self.get_model_response(
+                            client=self.answerer_client,
+                            model=self.answerer_model,
+                            prompt=validation_prompt,
+                            sampling_args=self.answerer_sampling_args,
+                            message_type="chat",
+                        )
 
-                raw_validation = validation_response.choices[0].message.content or ""
+                        if not validation_response.choices:
+                            self.logger.warning("API returned empty response for validation, assuming incorrect guess")
+                            is_correct = False
+                            break
+                        raw_validation = validation_response.choices[0].message.content or ""
+                        parsed_validation = self.answerer_parser.parse(raw_validation)
 
-                parsed_validation = self.answerer_parser.parse(raw_validation)
-                if hasattr(parsed_validation, "answer") and parsed_validation.answer:
-                    validation_text = parsed_validation.answer.strip().lower()
-                    is_correct = validation_text.startswith("yes")
-                else:
-                    # Try appending </answer> and parsing again
-                    fixed_validation = raw_validation + "\n</answer>"
-                    parsed_validation_fixed = self.answerer_parser.parse(fixed_validation)
+                        if hasattr(parsed_validation, "answer") and parsed_validation.answer:
+                            validation_text = parsed_validation.answer.strip().lower()
+                            is_correct = validation_text.startswith("yes")
+                            break
+                        else:
+                            if attempt == 2:
+                                self.logger.warning(
+                                    "Answerer failed to format validation response, assuming incorrect guess"
+                                )
+                                is_correct = False
+                    except Exception as e:
+                        self.logger.warning(f"Answerer API call failed (attempt {attempt + 1}): {e}")
+                        if attempt == 2:
+                            self.logger.warning("All answerer validation attempts failed, assuming incorrect guess")
+                            is_correct = False
 
-                    if hasattr(parsed_validation_fixed, "answer") and parsed_validation_fixed.answer:
-                        validation_text = parsed_validation_fixed.answer.strip().lower()
-                        is_correct = validation_text.startswith("yes")
-                    else:
-                        raise ValueError(f"Could not extract answer from validation response: {repr(raw_validation)}")
+            state["questions_asked"] = questions_asked + 1
 
             if is_correct:
                 state["game_won"] = True
+                state["game_over"] = True
                 state["final_message_sent"] = True
                 return [{"role": "user", "content": WINNING_MESSAGE.format(answer=answer)}], state
             else:
-                if state["questions_asked"] >= 20:
+                if state["questions_asked"] > 20:
+                    state["game_over"] = True
                     state["final_message_sent"] = True
                     return [
                         {
@@ -169,24 +195,23 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                         }
                     ], state
                 else:
+                    remaining_questions = 20 - state["questions_asked"]
                     return [
                         {
                             "role": "user",
-                            "content": f"No, that's not correct. You have {20 - state['questions_asked']} questions left.",
+                            "content": f"No, that's not correct. You have {remaining_questions} questions left.",
                         }
                     ], state
 
         if not hasattr(parsed, "question") or parsed.question is None:
-            # Try appending </question> and parsing again
-            fixed_content = last_message_content + "\n</question>"
-            parsed_fixed = self.parser.parse(fixed_content)
+            return [
+                {
+                    "role": "user",
+                    "content": "Please format your response properly using <question>your question</question> or <guess>your guess</guess> tags. Make sure to use proper XML formatting with both opening and closing tags.",
+                }
+            ], state
 
-            if hasattr(parsed_fixed, "question") and parsed_fixed.question is not None:
-                question = parsed_fixed.question.strip()
-            else:
-                raise ValueError(f"Could not extract question from model response: {repr(last_message_content)}")
-        else:
-            question = parsed.question.strip()
+        question = parsed.question.strip()
 
         answerer_prompt = [
             {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
@@ -196,29 +221,32 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             },
         ]
 
-        response = await self.get_model_response(
-            client=self.answerer_client,
-            model=self.answerer_model,
-            prompt=answerer_prompt,
-            sampling_args=self.answerer_sampling_args,
-            message_type="chat",
-        )
+        env_response_text = None
+        for attempt in range(3):
+            try:
+                response = await self.get_model_response(
+                    client=self.answerer_client,
+                    model=self.answerer_model,
+                    prompt=answerer_prompt,
+                    sampling_args=self.answerer_sampling_args,
+                    message_type="chat",
+                )
 
-        raw_response = response.choices[0].message.content or ""
+                raw_response = response.choices[0].message.content or ""
+                parsed_answer = self.answerer_parser.parse(raw_response)
 
-        parsed_answer = self.answerer_parser.parse(raw_response)
-
-        if hasattr(parsed_answer, "answer") and parsed_answer.answer:
-            env_response_text = parsed_answer.answer.strip()
-        else:
-            # Try appending </answer> and parsing again
-            fixed_response = raw_response + "\n</answer>"
-            parsed_answer_fixed = self.answerer_parser.parse(fixed_response)
-
-            if hasattr(parsed_answer_fixed, "answer") and parsed_answer_fixed.answer:
-                env_response_text = parsed_answer_fixed.answer.strip()
-            else:
-                raise ValueError(f"Could not extract answer from answerer response: {repr(raw_response)}")
+                if hasattr(parsed_answer, "answer") and parsed_answer.answer:
+                    env_response_text = parsed_answer.answer.strip()
+                    break
+                else:
+                    if attempt == 2:
+                        self.logger.warning("Answerer failed to format response, using fallback")
+                        env_response_text = "I'm not sure. Can you rephrase your question?"
+            except Exception as e:
+                self.logger.warning(f"Answerer API call failed (attempt {attempt + 1}): {e}")
+                if attempt == 2:
+                    self.logger.warning("All answerer API attempts failed, using fallback")
+                    env_response_text = "I'm having trouble responding. Can you rephrase your question?"
 
         state["questions_asked"] = questions_asked + 1
 
@@ -226,7 +254,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         formatted_response = f"{env_response_text}\nYou have {remaining_questions} questions left."
 
         if state["questions_asked"] == 20:
-            formatted_response = "You've used all 20 questions. Please make your final guess, what am I thinking of?"
+            formatted_response = f"{env_response_text}\nYou've used all 20 questions. Please make your final guess, what am I thinking of?"
 
         return [{"role": "user", "content": formatted_response}], state
 
@@ -258,9 +286,13 @@ def load_environment(
             "Either provide answerer_api_key parameter or set OPENAI_API_KEY environment variable."
         )
 
-    answerer_client = AsyncOpenAI(
-        base_url=answerer_base_url,
+    answerer_client = setup_client(
+        api_base_url=answerer_base_url,
         api_key=api_key,
+        timeout=600.0,
+        max_connections=100,
+        max_keepalive_connections=50,
+        max_retries=3,
     )
 
     from datasets import load_dataset
@@ -298,7 +330,7 @@ def load_environment(
     env = TwentyQuestionsEnv(
         dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        system_prompt=QUESTIONER_SYSTEM_PROMPT,
+        system_prompt=QUESTIONER_SYSTEM_PROMPT.format(format_str=parser.get_format_str()),
         parser=parser,
         rubric=rubric,
         answerer_client=answerer_client,
