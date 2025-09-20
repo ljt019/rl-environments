@@ -109,7 +109,12 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
         self.answerer_client = answerer_client
         self.answerer_model = answerer_model
-        self.answerer_sampling_args = {"temperature": 0.3}
+        self.answerer_sampling_args = {
+            "temperature": 0.3,
+            # Cap completions to avoid vLLM context overflow errors
+            "max_tokens": 256,
+            "max_completion_tokens": 256,
+        }
 
         self.answerer_parser = vf.XMLParser(
             fields=["answer"],

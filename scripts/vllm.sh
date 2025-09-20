@@ -16,6 +16,7 @@ main() {
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} uv run vf-vllm \
         --model ${MODEL_NAME} \
         --data-parallel-size ${DATA_PARALLEL_SIZE} \
+        --max-model-len 131072 \
         --enforce-eager \
         --disable-log-requests
 }
