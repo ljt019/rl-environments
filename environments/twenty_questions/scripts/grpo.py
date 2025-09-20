@@ -1,6 +1,8 @@
 import os
+import subprocess
 
-import prime_cli.api as prime
+from prime_cli.api.client import APIClient
+from prime_cli.api.pods import PodsClient
 
 import verifiers as vf
 from environments.twenty_questions.twenty_questions import load_environment
@@ -14,6 +16,32 @@ HUB_MODEL_ID = "ljt019/Qwen3-1.7B-20Q"
 RUN_NAME = "twenty-questions-grpo-190925"
 
 #############################################
+
+
+def kill_current_pod():
+    """Kill the current pod by matching hostname"""
+    try:
+        # Get hostname
+        hostname = subprocess.check_output(["hostname"], text=True).strip()
+
+        # Find and kill matching pod
+        client = APIClient()
+        pods_client = PodsClient(client)
+        pods = pods_client.list()
+
+        for pod in pods.data:
+            if pod.status == "ACTIVE" and (hostname in pod.id or (pod.name and hostname in pod.name)):
+                pods_client.delete(pod_id=pod.id)
+                print(f"Successfully killed pod '{pod.id}' (matched hostname: {hostname})")
+                return True
+
+        print(f"No matching pod found for hostname: {hostname}")
+        return False
+
+    except Exception as e:
+        print(f"Failed to kill pod: {e}")
+        return False
+
 
 env = load_environment(
     answerer_model="gpt-4.1-nano",
@@ -43,4 +71,6 @@ trainer = vf.GRPOTrainer(
 try:
     trainer.train()
 except Exception as e:
-    print(e)
+    print(f"Training failed: {e}")
+    print("Attempting to kill current pod...")
+    kill_current_pod()
