@@ -1,5 +1,7 @@
 import os
 
+import prime_cli.api as prime
+
 import verifiers as vf
 from environments.twenty_questions.twenty_questions import load_environment
 
@@ -38,4 +40,7 @@ trainer = vf.GRPOTrainer(
     hub_model_id=HUB_MODEL_ID,
 )
 
-trainer.train()
+try:
+    trainer.train()
+except Exception as e:
+    print(e)
