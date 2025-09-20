@@ -1,19 +1,19 @@
 import os
 import subprocess
 
+import verifiers as vf
 from prime_cli.api.client import APIClient
 from prime_cli.api.pods import PodsClient
 
-import verifiers as vf
 from environments.twenty_questions.twenty_questions import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "willcb/Qwen3-1.7B"
+MODEL_NAME = "willcb/Qwen3-4B"
 
-HUB_MODEL_ID = "ljt019/Qwen3-1.7B-20Q"
+HUB_MODEL_ID = "ljt019/Qwen3-4B-20Q"
 
-RUN_NAME = "twenty-questions-grpo-190925"
+RUN_NAME = "twenty-questions-grpo-200925"
 
 #############################################
 
