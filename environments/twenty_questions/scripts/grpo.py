@@ -7,6 +7,8 @@ from environments.twenty_questions.twenty_questions import load_environment
 
 MODEL_NAME = "willcb/Qwen3-4B"
 
+HUB_MODEL_ID = "ljt019/Qwen3-4B-20Q"
+
 RUN_NAME = "twenty-questions-grpo-190925"
 
 #############################################
@@ -25,11 +27,15 @@ args.async_generation_timeout = 1800.0  # 30 minutes
 args.max_tokens = 512
 args.max_seq_len = 2048
 
+args.save_steps = 25
+
 trainer = vf.GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     env=env,
     args=args,
+    push_to_hub=True,
+    hub_model_id=HUB_MODEL_ID,
 )
 
 trainer.train()

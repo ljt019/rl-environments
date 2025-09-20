@@ -2,22 +2,27 @@
 
 ############## Training Config ##############
 
-CUDA_VISIBLE_DEVICES="2,3"
+CUDA_VISIBLE_DEVICES="1"
 
 #############################################
 
 main() {
-    # Get script path from argument, default to scripts/grpo.py
-    SCRIPT_PATH=${1:-"scripts/grpo.py"}
+    # Get environment name from argument
+    ENV_NAME=${1:-""}
+    
+    if [[ -z "$ENV_NAME" ]]; then
+        echo "Error: Environment name required!"
+    fi
+    
+    # Construct the script path
+    SCRIPT_PATH="environments/${ENV_NAME}/scripts/grpo.py"
     
     # Check if script exists
     if [[ ! -f "$SCRIPT_PATH" ]]; then
         echo "Error: Script '$SCRIPT_PATH' not found!"
-        echo "Usage: $0 [script_path]"
-        echo "Examples:"
-        echo "  $0                                    # Uses default scripts/grpo.py"
-        echo "  $0 environments/battleship/scripts/grpo.py"
-        echo "  $0 my_custom_training.py"
+        echo "Make sure the environment '${ENV_NAME}' exists and has a scripts/grpo.py file."
+        echo "Available environments:"
+        ls -1 environments/ 2>/dev/null | grep -v __pycache__ || echo "  (none found)"
         exit 1
     fi
     
