@@ -5,9 +5,9 @@ from environments.twenty_questions.twenty_questions import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "willcb/Qwen3-4B"
+MODEL_NAME = "willcb/Qwen3-1.7B"
 
-HUB_MODEL_ID = "ljt019/Qwen3-4B-20Q"
+HUB_MODEL_ID = "ljt019/Qwen3-1.7B-20Q"
 
 RUN_NAME = "twenty-questions-grpo-190925"
 
