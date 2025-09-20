@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Tuple
 
@@ -35,23 +36,43 @@ Examples: <answer>Yes</answer> or <answer>No</answer> or <answer>I don't know</a
 ANSWERER_USER_PROMPT = "{question}"
 
 QUESTIONER_SYSTEM_PROMPT = """
-You are playing twenty questions. Try to guess what the user is thinking of by asking yes or no questions. You have up to 20 questions, but may make your guess early if you wish. 
-If you make your guess early, it will count as one of your questions, so guess wisely!
+You are playing twenty questions, your job is to guess what the user is thinking of by asking yes/no questions. 
 
-Use <think> tags to show your reasoning, then either <question> for yes/no questions or <guess> for your final answer.
+Make sure you read the game instructions carefully, and always follow the required format.
 
-Remember that early guesses cost you one of your questions, but after your 20th question you will be allowed a final guess.
-
-CRITICAL: 
-- Always use either <question> or <guess>, never both in the same response.
-- You MUST use proper XML formatting with both opening AND closing tags.
-
-Expected format:
+Required format:
 {format_str}
 """
 
 WINNING_MESSAGE = "Yes! The answer was '{answer}'. You got it!"
+
 MAX_QUESTIONS_MESSAGE = "No! The answer was '{answer}'. You lost!"
+
+INITIAL_QUESTION_MESSAGE = """
+Rules:
+- You have up to 20 questions.
+- After the 20th question you will be allowed a final guess.
+- You may make your guess early if you wish, for the cost of one of your remaining questions.
+
+CRITICAL: Never include both <question> and <guess> in the same message.
+
+Ask your first yes/no question to begin.
+"""
+
+ANSWERER_MAX_RETRIES = 3
+ANSWERER_RETRY_BACKOFF_SECONDS = 1.0
+
+INVALID_XML_FORMAT_MESSAGE = (
+    "Please format your response properly using the required XML tags. Expected format:\n{format_str}"
+)
+
+INCORRECT_GUESS_MESSAGE = "No, that's not correct. You have {remaining_questions} questions left."
+
+REMAINING_QUESTIONS_RESPONSE_TEMPLATE = "{answer_text}\nYou have {remaining_questions} questions left."
+
+FINAL_GUESS_PROMPT_MESSAGE_TEMPLATE = (
+    "{answer_text}\nYou've used all 20 questions. Please make your final guess, what am I thinking of?"
+)
 
 
 class TwentyQuestionsEnv(vf.MultiTurnEnv):
@@ -122,7 +143,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             return [
                 {
                     "role": "user",
-                    "content": f"Please format your response properly using the required XML tags. Expected format:\n{self.parser.get_format_str()}",
+                    "content": INVALID_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
                 }
             ], state
 
@@ -185,7 +206,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                 state["final_message_sent"] = True
                 return [{"role": "user", "content": WINNING_MESSAGE.format(answer=answer)}], state
             else:
-                if state["questions_asked"] > 20:
+                if state["questions_asked"] >= 20:
                     state["game_over"] = True
                     state["final_message_sent"] = True
                     return [
@@ -199,7 +220,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                     return [
                         {
                             "role": "user",
-                            "content": f"No, that's not correct. You have {remaining_questions} questions left.",
+                            "content": INCORRECT_GUESS_MESSAGE.format(remaining_questions=remaining_questions),
                         }
                     ], state
 
@@ -207,7 +228,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             return [
                 {
                     "role": "user",
-                    "content": "Please format your response properly using <question>your question</question> or <guess>your guess</guess> tags. Make sure to use proper XML formatting with both opening and closing tags.",
+                    "content": INVALID_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
                 }
             ], state
 
@@ -222,7 +243,8 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         ]
 
         env_response_text = None
-        for attempt in range(3):
+        last_error: Exception | None = None
+        for attempt in range(ANSWERER_MAX_RETRIES):
             try:
                 response = await self.get_model_response(
                     client=self.answerer_client,
@@ -238,23 +260,41 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                 if hasattr(parsed_answer, "answer") and parsed_answer.answer:
                     env_response_text = parsed_answer.answer.strip()
                     break
-                else:
-                    if attempt == 2:
-                        self.logger.warning("Answerer failed to format response, using fallback")
-                        env_response_text = "I'm not sure. Can you rephrase your question?"
+
+                last_error = ValueError("Answerer returned an improperly formatted response.")
+                self.logger.warning(
+                    "Answerer failed to format response (attempt %d/%d).",
+                    attempt + 1,
+                    ANSWERER_MAX_RETRIES,
+                )
             except Exception as e:
-                self.logger.warning(f"Answerer API call failed (attempt {attempt + 1}): {e}")
-                if attempt == 2:
-                    self.logger.warning("All answerer API attempts failed, using fallback")
-                    env_response_text = "I'm having trouble responding. Can you rephrase your question?"
+                last_error = e
+                self.logger.warning(
+                    "Answerer API call failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    ANSWERER_MAX_RETRIES,
+                    e,
+                )
+
+            if attempt < ANSWERER_MAX_RETRIES - 1:
+                backoff_seconds = ANSWERER_RETRY_BACKOFF_SECONDS * (2**attempt)
+                await asyncio.sleep(backoff_seconds)
+
+        if env_response_text is None:
+            error_message = "Answerer failed to produce a valid response after %d attempts." % ANSWERER_MAX_RETRIES
+            self.logger.error(error_message)
+            raise RuntimeError(error_message) from last_error
 
         state["questions_asked"] = questions_asked + 1
 
         remaining_questions = 20 - state["questions_asked"]
-        formatted_response = f"{env_response_text}\nYou have {remaining_questions} questions left."
+        formatted_response = REMAINING_QUESTIONS_RESPONSE_TEMPLATE.format(
+            answer_text=env_response_text,
+            remaining_questions=remaining_questions,
+        )
 
         if state["questions_asked"] == 20:
-            formatted_response = f"{env_response_text}\nYou've used all 20 questions. Please make your final guess, what am I thinking of?"
+            formatted_response = FINAL_GUESS_PROMPT_MESSAGE_TEMPLATE.format(answer_text=env_response_text)
 
         return [{"role": "user", "content": formatted_response}], state
 
@@ -298,6 +338,8 @@ def load_environment(
     from datasets import load_dataset
 
     dataset = load_dataset("ljt019/twenty-questions-600")
+
+    dataset = dataset.map(lambda example: {"question": INITIAL_QUESTION_MESSAGE})
 
     parser = vf.XMLParser(
         fields=["think", ("question", "guess")],

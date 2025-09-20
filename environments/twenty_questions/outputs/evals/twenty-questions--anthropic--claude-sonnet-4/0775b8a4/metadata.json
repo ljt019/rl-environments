@@ -1,1 +1,0 @@
-{"env": "twenty-questions", "model": "anthropic/claude-sonnet-4", "num_examples": 5, "rollouts_per_example": 3, "sampling_args": {"max_tokens": null}, "date": "2025-09-11", "time": "11:51:45", "avg_reward": 0.5866666666666666, "avg_victory_reward": 0.26666666666666666, "avg_efficiency_reward": 0.04, "avg_format_reward_func": 1.0}
