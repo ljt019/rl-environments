@@ -5,37 +5,58 @@ from prime_cli.api.pods import PodsClient
 
 
 def get_current_pod_id():
-    """Find the current pod ID by matching internal IP from SSH_CONNECTION"""
+    """Find the current pod ID by matching various criteria"""
     client = APIClient()
     pods_client = PodsClient(client)
 
-    # Get current internal IP from SSH_CONNECTION
+    # Get environment info
     ssh_connection = os.getenv("SSH_CONNECTION", "")
+    jupyter_password = os.getenv("JUPYTER_PASSWORD", "")
     print(f"SSH_CONNECTION: {ssh_connection}")
+    print(f"JUPYTER_PASSWORD: {jupyter_password}")
 
-    if ssh_connection:
-        # Format: "external_ip external_port internal_ip internal_port"
-        parts = ssh_connection.split()
-        if len(parts) >= 3:
-            current_ip = parts[2]  # Should be 10.2.28.198
-            print(f"Looking for pod with IP: {current_ip}")
+    # Get hostname
+    try:
+        import subprocess
 
-            try:
-                # List all pods and find matching IP
-                pods = pods_client.list()
-                print(f"Found {len(pods.data)} total pods")
+        hostname = subprocess.check_output(["hostname"], text=True).strip()
+        print(f"HOSTNAME: {hostname}")
+    except:
+        hostname = ""
 
-                for pod in pods.data:
-                    print(f"Pod {pod.id}: IP={pod.ip}, Status={pod.status}")
+    try:
+        # List all pods
+        pods = pods_client.list()
+        print(f"Found {len(pods.data)} total pods")
 
-                    # Check if IP matches (handle both string and list cases)
-                    if pod.ip == current_ip or (isinstance(pod.ip, list) and current_ip in pod.ip):
-                        print(f"Found matching pod: {pod.id}")
-                        return pod.id
+        for pod in pods.data:
+            print(f"\nPod {pod.id}:")
+            print(f"  IP: {pod.ip}")
+            print(f"  Status: {pod.status}")
+            print(f"  Name: {pod.name}")
+            if hasattr(pod, "jupyter_password"):
+                print(f"  Jupyter Password: {pod.jupyter_password}")
 
-            except Exception as e:
-                print(f"Error listing pods: {e}")
-                return None
+            # Try multiple matching strategies
+
+            # Strategy 1: Match by Jupyter password
+            if jupyter_password and hasattr(pod, "jupyter_password") and pod.jupyter_password == jupyter_password:
+                print(f"Found matching pod by Jupyter password: {pod.id}")
+                return pod.id
+
+            # Strategy 2: Match by hostname in pod name/ID
+            if hostname and (hostname in pod.id or (pod.name and hostname in pod.name)):
+                print(f"Found matching pod by hostname: {pod.id}")
+                return pod.id
+
+            # Strategy 3: If only one ACTIVE pod, assume it's this one
+            if pod.status == "ACTIVE":
+                print(f"Found ACTIVE pod (assuming current): {pod.id}")
+                return pod.id
+
+    except Exception as e:
+        print(f"Error listing pods: {e}")
+        return None
 
     print("Could not determine current pod ID")
     return None
