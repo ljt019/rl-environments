@@ -41,6 +41,8 @@ Make sure you read the game instructions carefully, and always follow the requir
 
 Required format:
 {format_str}
+
+IMPORTANT: Keep <think> sections concise, don't overthink it.
 """
 
 WINNING_MESSAGE = "Yes! The answer was '{answer}'. You got it!"
@@ -53,9 +55,7 @@ Rules:
 - After the 20th question you will be allowed a final guess.
 - You may make your guess early if you wish, for the cost of one of your remaining questions.
 
-CRITICAL: 
-- Never include both <question> and <guess> in the same message.
-- Keep <think> sections concise, don't overthink it.
+IMPORTANT: Never include both <question> and <guess> in the same message.
 
 Ask your first yes/no question to begin.
 """
