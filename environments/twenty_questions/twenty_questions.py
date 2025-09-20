@@ -3,9 +3,8 @@ import logging
 from typing import Tuple
 
 import httpx
-from openai import AsyncOpenAI
-
 import verifiers as vf
+from openai import AsyncOpenAI
 from verifiers.types import Messages, State
 
 
@@ -263,9 +262,10 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
                 last_error = ValueError("Answerer returned an improperly formatted response.")
                 self.logger.warning(
-                    "Answerer failed to format response (attempt %d/%d).",
+                    "Answerer failed to format response (attempt %d/%d). Raw response: %r",
                     attempt + 1,
                     ANSWERER_MAX_RETRIES,
+                    raw_response,
                 )
             except Exception as e:
                 last_error = e
