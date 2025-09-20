@@ -22,12 +22,16 @@ main() {
     log_info "Installing verifiers and flash-attn..."
     uv add 'verifiers[all]' && uv pip install flash-attn --no-build-isolation
 
+    log_info "Installing prime-cli..."
+    uv add prime-cli
+
     log_info "Installing dependencies in virtual environment..."
     uv sync
 
     log_info "Logging in to HuggingFace & WandB..."
     uv run hf auth login
     uv run wandb login
+    uv run prime login
 
     log_info "Setup completed!"
 }
