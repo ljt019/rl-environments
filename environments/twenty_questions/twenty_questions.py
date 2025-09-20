@@ -3,9 +3,8 @@ import logging
 from typing import Tuple
 
 import httpx
-from openai import AsyncOpenAI
-
 import verifiers as vf
+from openai import AsyncOpenAI
 from verifiers.types import Messages, State
 
 
@@ -54,7 +53,9 @@ Rules:
 - After the 20th question you will be allowed a final guess.
 - You may make your guess early if you wish, for the cost of one of your remaining questions.
 
-CRITICAL: Never include both <question> and <guess> in the same message.
+CRITICAL: 
+- Never include both <question> and <guess> in the same message.
+- Keep <think> sections concise, don't overthink it.
 
 Ask your first yes/no question to begin.
 """
@@ -135,48 +136,6 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         state["game_over"] = False
         state["final_message_sent"] = False
         return state
-
-    async def get_model_response(
-        self,
-        client: AsyncOpenAI,
-        model: str,
-        prompt: Messages,
-        oai_tools=None,
-        sampling_args=None,
-        message_type=None,
-        **kwargs,
-    ):
-        """Proxy to base get_model_response that strips <think> from assistant content.
-
-        This ensures prior hidden reasoning is not fed back into history.
-        """
-        response = await super().get_model_response(
-            client=client,
-            model=model,
-            prompt=prompt,
-            oai_tools=oai_tools,
-            sampling_args=sampling_args,
-            message_type=message_type,
-            **kwargs,
-        )
-        try:
-            if hasattr(response, "choices") and response.choices:
-                msg = response.choices[0].message
-                if msg and getattr(msg, "content", None):
-                    parsed = self.parser.parse(msg.content)
-                    if parsed is not None:
-                        new_content = None
-                        # For the questioner, exactly one of <question> or <guess> should be present
-                        if hasattr(parsed, "guess") and parsed.guess:
-                            new_content = f"<guess>{parsed.guess}</guess>"
-                        elif hasattr(parsed, "question") and parsed.question:
-                            new_content = f"<question>{parsed.question}</question>"
-                        # For other cases, leave content unchanged
-                        if new_content is not None and new_content != msg.content:
-                            response.choices[0].message.content = new_content
-        except Exception:
-            pass
-        return response
 
     async def is_completed(self, messages: Messages, state: State, **kwargs) -> bool:
         """Game is complete after final message has been sent."""
