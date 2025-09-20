@@ -3,8 +3,9 @@ import logging
 from typing import Tuple
 
 import httpx
-import verifiers as vf
 from openai import AsyncOpenAI
+
+import verifiers as vf
 from verifiers.types import Messages, State
 
 
@@ -66,6 +67,10 @@ ANSWERER_RETRY_BACKOFF_SECONDS = 1.0
 INVALID_XML_FORMAT_MESSAGE = (
     "Please format your response properly using the required XML tags. Expected format:\n{format_str}"
 )
+
+TOO_MANY_INVALID_RESPONSES_MESSAGE = "Too many invalid responses. The answer was '{answer}'. You lost!"
+
+MAX_CONSECUTIVE_INVALID_RESPONSES = 3
 
 INCORRECT_GUESS_MESSAGE = "No, that's not correct. You have {remaining_questions} questions left."
 
@@ -135,6 +140,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         state["questions_asked"] = 0
         state["game_over"] = False
         state["final_message_sent"] = False
+        state["consecutive_invalid"] = 0
         return state
 
     async def is_completed(self, messages: Messages, state: State, **kwargs) -> bool:
@@ -143,6 +149,27 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         final_message_sent = state.get("final_message_sent", False)
 
         return game_over and final_message_sent
+
+    def _handle_invalid_response(self, state: State) -> tuple[Messages, State]:
+        """Return an invalid-format warning, ending early after repeated failures."""
+        consecutive = state.get("consecutive_invalid", 0) + 1
+        state["consecutive_invalid"] = consecutive
+        if consecutive >= MAX_CONSECUTIVE_INVALID_RESPONSES:
+            state["game_over"] = True
+            state["final_message_sent"] = True
+            return [
+                {
+                    "role": "user",
+                    "content": TOO_MANY_INVALID_RESPONSES_MESSAGE.format(answer=state.get("answer", "unknown")),
+                }
+            ], state
+
+        return [
+            {
+                "role": "user",
+                "content": INVALID_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
+            }
+        ], state
 
     async def env_response(self, messages: Messages, state: State, **kwargs) -> Tuple[Messages, State]:
         """
@@ -163,12 +190,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         if not parsed or (
             not (hasattr(parsed, "guess") and parsed.guess) and not (hasattr(parsed, "question") and parsed.question)
         ):
-            return [
-                {
-                    "role": "user",
-                    "content": INVALID_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
-                }
-            ], state
+            return self._handle_invalid_response(state)
 
         if hasattr(parsed, "guess") and parsed.guess:
             guess = parsed.guess.strip().lower()
@@ -221,6 +243,8 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                             self.logger.warning("All answerer validation attempts failed, assuming incorrect guess")
                             is_correct = False
 
+            state["consecutive_invalid"] = 0
+
             state["questions_asked"] = questions_asked + 1
 
             if is_correct:
@@ -248,14 +272,10 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                     ], state
 
         if not hasattr(parsed, "question") or parsed.question is None:
-            return [
-                {
-                    "role": "user",
-                    "content": INVALID_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
-                }
-            ], state
+            return self._handle_invalid_response(state)
 
         question = parsed.question.strip()
+        state["consecutive_invalid"] = 0
 
         answerer_prompt = [
             {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
