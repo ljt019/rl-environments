@@ -6,7 +6,7 @@ from environments.twenty_questions.twenty_questions import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "willcb/Qwen3-1.7B"
+MODEL_NAME = "willcb/Qwen3-4B"
 
 RUN_NAME = "twenty-questions-grpo-190925"
 
