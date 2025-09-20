@@ -22,6 +22,8 @@ model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 args = vf.grpo_defaults(run_name=RUN_NAME)
 args.async_generation_timeout = 1800.0  # 30 minutes
 
+args.max_tokens = 512
+
 trainer = vf.GRPOTrainer(
     model=model,
     processing_class=tokenizer,
