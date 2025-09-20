@@ -262,9 +262,10 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
 
                 last_error = ValueError("Answerer returned an improperly formatted response.")
                 self.logger.warning(
-                    "Answerer failed to format response (attempt %d/%d). Raw response: %r",
+                    "Answerer failed to format response (attempt %d/%d). Prompt: %r. Raw response: %r",
                     attempt + 1,
                     ANSWERER_MAX_RETRIES,
+                    answerer_prompt,
                     raw_response,
                 )
             except Exception as e:
