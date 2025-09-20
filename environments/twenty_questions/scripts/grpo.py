@@ -23,6 +23,7 @@ args = vf.grpo_defaults(run_name=RUN_NAME)
 args.async_generation_timeout = 1800.0  # 30 minutes
 
 args.max_tokens = 512
+args.max_seq_len = 2048
 
 trainer = vf.GRPOTrainer(
     model=model,
