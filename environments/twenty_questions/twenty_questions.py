@@ -3,9 +3,8 @@ import logging
 from typing import Tuple
 
 import httpx
-from openai import AsyncOpenAI
-
 import verifiers as vf
+from openai import AsyncOpenAI
 from verifiers.types import Messages, State
 
 
@@ -314,6 +313,7 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
                 )
             except Exception as e:
                 last_error = e
+                print(last_error)
                 self.logger.warning(
                     "Answerer API call failed (attempt %d/%d): %s",
                     attempt + 1,
@@ -328,7 +328,13 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
         if env_response_text is None:
             error_message = "Answerer failed to produce a valid response after %d attempts." % ANSWERER_MAX_RETRIES
             self.logger.error(error_message)
-            raise RuntimeError(error_message) from last_error
+
+            # Instead of crashing, end the game early with 0 reward
+            state["game_over"] = True
+            state["final_message_sent"] = True
+            state["game_won"] = False  # Ensure no victory reward
+
+            return [{"role": "user", "content": TOO_MANY_INVALID_RESPONSES_MESSAGE.format(answer=answer)}], state
 
         state["questions_asked"] = questions_asked + 1
 
