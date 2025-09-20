@@ -1,7 +1,6 @@
 import os
 
 import verifiers as vf
-
 from environments.twenty_questions.twenty_questions import load_environment
 
 ############## Training Config ##############
@@ -21,6 +20,7 @@ env = load_environment(
 model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 
 args = vf.grpo_defaults(run_name=RUN_NAME)
+args.async_generation_timeout = 1800.0  # 30 minutes
 
 trainer = vf.GRPOTrainer(
     model=model,

@@ -3,8 +3,9 @@ import logging
 from typing import Tuple
 
 import httpx
-import verifiers as vf
 from openai import AsyncOpenAI
+
+import verifiers as vf
 from verifiers.types import Messages, State
 
 
@@ -64,6 +65,8 @@ ANSWERER_RETRY_BACKOFF_SECONDS = 1.0
 INVALID_XML_FORMAT_MESSAGE = (
     "Please format your response properly using the required XML tags. Expected format:\n{format_str}"
 )
+
+INVALID_NESTED_XML_FORMAT_MESSAGE = "Don't nest XML tags in your response. Expected format:\n{format_str}"
 
 INCORRECT_GUESS_MESSAGE = "No, that's not correct. You have {remaining_questions} questions left."
 
@@ -232,6 +235,15 @@ class TwentyQuestionsEnv(vf.MultiTurnEnv):
             ], state
 
         question = parsed.question.strip()
+
+        if "<" in question or ">" in question:
+            self.logger.warning("Received question with XML markers: %s", question)
+            return [
+                {
+                    "role": "user",
+                    "content": INVALID_NESTED_XML_FORMAT_MESSAGE.format(format_str=self.parser.get_format_str()),
+                }
+            ], state
 
         answerer_prompt = [
             {"role": "system", "content": self.answerer_system_prompt.format(answer=answer)},
