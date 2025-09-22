@@ -100,6 +100,32 @@ def load_environment(
                 _st_model["model"] = model
             return _st_model["model"]
 
+    def _safe_encode(texts):
+        import numpy as np
+        from sentence_transformers import SentenceTransformer
+
+        def _encode_current(t):
+            model = _get_st_model()
+            emb = model.encode(
+                t,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                batch_size=32,
+                show_progress_bar=False,
+            )
+            return np.atleast_2d(emb)
+
+        try:
+            return _encode_current(texts)
+        except Exception:
+            # Fallback: reinitialize on CPU and retry once
+            with _st_lock:
+                _st_model["model"] = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+            try:
+                return _encode_current(texts)
+            except Exception:
+                return None
+
     def semantic_similarity_reward(completion, **kwargs):
         """
         Returns semantic similarity between predicted and gold comments as a scalar in [0, 1].
@@ -107,11 +133,13 @@ def load_environment(
         """
         import numpy as np
 
-        model = _get_st_model()
-
         state = kwargs["state"]
-        pred_comments = parser.parse_answer(completion)
-        gold_comments = state.get("info", {}).get("gold_comments", [])
+        pred_comments_raw = parser.parse_answer(completion)
+        gold_comments_raw = state.get("info", {}).get("gold_comments", [])
+
+        # Clean and validate comments
+        pred_comments = [str(c).strip() for c in (pred_comments_raw or []) if isinstance(c, str) and str(c).strip()]
+        gold_comments = [str(c).strip() for c in (gold_comments_raw or []) if isinstance(c, str) and str(c).strip()]
 
         # If both are empty, perfect agreement
         if not pred_comments and not gold_comments:
@@ -120,8 +148,10 @@ def load_environment(
         if not pred_comments or not gold_comments:
             return 0.0
 
-        pred_emb = model.encode(pred_comments, normalize_embeddings=True)
-        gold_emb = model.encode(gold_comments, normalize_embeddings=True)
+        pred_emb = _safe_encode(pred_comments)
+        gold_emb = _safe_encode(gold_comments)
+        if pred_emb is None or gold_emb is None:
+            return 0.0
 
         # Ensure 2D arrays
         pred_emb = np.atleast_2d(pred_emb)
