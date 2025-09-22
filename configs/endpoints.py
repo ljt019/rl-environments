@@ -15,12 +15,17 @@ ENDPOINTS = {
         "key": "OPENROUTER_API_KEY",
     },
     "gpt-4.1-mini": {
-        "model": "openai/gpt-4o-mini",
+        "model": "openai/gpt-4.1-mini",
         "url": "https://openrouter.ai/api/v1",
         "key": "OPENROUTER_API_KEY",
     },
     "gpt-5-mini": {
         "model": "openai/gpt-5-mini",
+        "url": "https://openrouter.ai/api/v1",
+        "key": "OPENROUTER_API_KEY",
+    },
+    "gpt-5": {
+        "model": "openai/gpt-5",
         "url": "https://openrouter.ai/api/v1",
         "key": "OPENROUTER_API_KEY",
     },
@@ -31,6 +36,11 @@ ENDPOINTS = {
     },
     "kimi-k2": {
         "model": "moonshotai/kimi-k2-0905",
+        "url": "https://openrouter.ai/api/v1",
+        "key": "OPENROUTER_API_KEY",
+    },
+    "qwen3-coder-flash": {
+        "model": "qwen/qwen3-coder-flash",
         "url": "https://openrouter.ai/api/v1",
         "key": "OPENROUTER_API_KEY",
     },

@@ -234,13 +234,7 @@ def extract_rust_code(response) -> str:
     import re
 
     if isinstance(response, list):
-        text = "\n".join(
-            [
-                msg.get("content", "")
-                for msg in response
-                if msg.get("role") == "assistant"
-            ]
-        )
+        text = "\n".join([msg.get("content", "") for msg in response if msg.get("role") == "assistant"])
     else:
         text = response
 
@@ -250,20 +244,14 @@ def extract_rust_code(response) -> str:
     if match:
         return match.group(1)
     else:
-        return None
+        return ""
 
 
 def extract_test_code(response) -> str:
     import re
 
     if isinstance(response, list):
-        text = "\n".join(
-            [
-                msg.get("content", "")
-                for msg in response
-                if msg.get("role") == "assistant"
-            ]
-        )
+        text = "\n".join([msg.get("content", "") for msg in response if msg.get("role") == "assistant"])
     else:
         text = response
 
@@ -273,4 +261,4 @@ def extract_test_code(response) -> str:
     if match:
         return match.group(1)
     else:
-        return None
+        return ""
