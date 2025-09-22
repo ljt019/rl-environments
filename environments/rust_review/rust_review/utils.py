@@ -216,16 +216,39 @@ def _run_cargo_command(command: str, code: str) -> bool:
     import os
     import shutil
     import subprocess
+    from shutil import which
 
     project_dir = _setup_rust_project(code)
 
     try:
+        # Ensure cargo is on PATH for non-login shells
+        env = os.environ.copy()
+        candidate_paths = []
+        cargo_home = env.get("CARGO_HOME")
+        if cargo_home:
+            candidate_paths.append(os.path.join(cargo_home, "bin"))
+        # Default user install location
+        candidate_paths.append(os.path.expanduser("~/.cargo/bin"))
+        # Common alternate
+        candidate_paths.append("/usr/local/cargo/bin")
+
+        path_parts = env.get("PATH", "").split(os.pathsep)
+        for p in candidate_paths:
+            if p and p not in path_parts and os.path.isdir(p):
+                path_parts.insert(0, p)
+        env["PATH"] = os.pathsep.join(path_parts)
+
+        # Optional: surface a clearer error if cargo still missing
+        if which("cargo", path=env["PATH"]) is None:
+            raise FileNotFoundError("cargo not found on PATH. Ensure Rust is installed and ~/.cargo/bin is on PATH.")
+
         result = subprocess.run(
             ["cargo", command, "--quiet"],
             cwd=project_dir,
             capture_output=True,
             text=True,
             timeout=60,
+            env=env,
         )
         success = result.returncode == 0
     except Exception as e:
