@@ -4,7 +4,7 @@ from environments.rust_review.rust_review import load_environment
 ############## Training Config ##############
 
 MODEL_NAME = "ljt019/Qwen2.5-Coder-1.5B-Instruct-rust"
-CODER_MODEL = "qwen/qwen3-coder-30b-a3b-instruct"
+CODER_MODEL = "qwen/qwen3-coder-flash"
 
 RUN_NAME = "rust-review-grpo-230825"
 
