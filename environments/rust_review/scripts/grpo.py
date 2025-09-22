@@ -1,12 +1,11 @@
 import verifiers as vf
-
 from environments.rust_cargo.rust_cargo import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+MODEL_NAME = "ljt019/Qwen2.5-Coder-1.5B-Instruct-rust"
 
-RUN_NAME = "rust-cargo-grpo-230825"
+RUN_NAME = "rust-review-grpo-230825"
 
 #############################################
 
