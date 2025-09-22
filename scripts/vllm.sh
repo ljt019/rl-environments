@@ -3,7 +3,7 @@
 ############## vLLM Config ##############
 
 MODEL_NAME="ljt019/Qwen2.5-Coder-1.5B-Instruct-rust"
-CUDA_VISIBLE_DEVICES="1"
+CUDA_VISIBLE_DEVICES="0"
 
 ##############################################
 
