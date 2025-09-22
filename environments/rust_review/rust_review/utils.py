@@ -35,8 +35,8 @@ def get_code_from_applied_comments(model, client, completion, state):
     Gets the original code from state, extracts review comments from completion,
     and uses the coder model to apply the comments to generate improved code.
     """
-    # Check if we already generated the refined code
-    if "refined_code" in state:
+    # Check if we already generated the refined code (and it's not a cached None)
+    if "refined_code" in state and state["refined_code"] is not None:
         return state["refined_code"]
 
     # Extract original code from the user prompt
@@ -53,9 +53,11 @@ def get_code_from_applied_comments(model, client, completion, state):
     comments = parser.parse_answer(completion)
 
     if not comments:
-        print("[DEBUG] No review comments found in completion")
-        state["refined_code"] = None
-        return None
+        print("[DEBUG] No review comments found; using original code as refined_code")
+        state["refined_code"] = original_code
+        state["original_code"] = original_code
+        state["comments_applied"] = []
+        return original_code
 
     # Format comments as a bullet list
     comments_text = "\n".join([f"- {comment}" for comment in comments])

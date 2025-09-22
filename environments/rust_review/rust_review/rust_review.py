@@ -177,7 +177,8 @@ def load_environment(
         state = kwargs["state"]
         refined_code = get_code_from_applied_comments(coder_model, coder_client, completion, state)
         if not refined_code:
-            raise ValueError("No refined code produced from review comments.")
+            # If no refined code (should be rare now), return 0.0 instead of raising
+            return 0.0
 
         gold_code = state.get("info", {}).get("gold_code", "")
         if not gold_code:
@@ -204,7 +205,7 @@ def load_environment(
         gold_tokens = tokenize_rust_code(gold_code)
 
         if not refined_tokens or not gold_tokens:
-            raise ValueError("Tokenization produced empty tokens for refined or gold code.")
+            return 0.0
 
         # Build ignoring set from gold/reference code only (Rust-only background)
         # Avoids leakage from the candidate into the ignoring set
