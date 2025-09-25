@@ -95,17 +95,11 @@ def load_environment(
     _st_model = {"model": None}
 
     def _get_st_model():
-        import torch
-        from sentence_transformers import SentenceTransformer
-
         with _st_lock:
             if _st_model["model"] is None:
-                device = (
-                    "cuda"
-                    if torch.cuda.is_available()
-                    else ("mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu")
-                )
-                model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+                from sentence_transformers import SentenceTransformer
+
+                model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
                 _st_model["model"] = model
             return _st_model["model"]
 
@@ -115,6 +109,7 @@ def load_environment(
 
         def _encode_current(t):
             model = _get_st_model()
+            print(f"[RUST_REVIEW] _safe_encode: encoding {len(t)} texts with device={model.device}")
             emb = model.encode(
                 t,
                 normalize_embeddings=True,
@@ -122,17 +117,21 @@ def load_environment(
                 batch_size=32,
                 show_progress_bar=False,
             )
+            print("[RUST_REVIEW] _safe_encode: encoding complete")
             return np.atleast_2d(emb)
 
         try:
             return _encode_current(texts)
         except Exception:
             # Fallback: reinitialize on CPU and retry once
+            print("[RUST_REVIEW] _safe_encode: encoding failed, retrying on CPU")
             with _st_lock:
                 _st_model["model"] = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
             try:
+                print("[RUST_REVIEW] _safe_encode: retry encode on CPU")
                 return _encode_current(texts)
             except Exception:
+                print("[RUST_REVIEW] _safe_encode: retry failed")
                 return None
 
     def semantic_similarity_reward(completion, **kwargs):
@@ -164,6 +163,9 @@ def load_environment(
 
         pred_emb = _safe_encode(pred_comments)
         gold_emb = _safe_encode(gold_comments)
+        print(
+            f"[RUST_REVIEW] semantic_similarity_reward: pred_emb type={type(pred_emb)}, gold_emb type={type(gold_emb)}"
+        )
         if pred_emb is None or gold_emb is None:
             print("[RUST_REVIEW] semantic_similarity_reward: encode failed -> 0.0")
             return 0.0
@@ -171,9 +173,13 @@ def load_environment(
         # Ensure 2D arrays
         pred_emb = np.atleast_2d(pred_emb)
         gold_emb = np.atleast_2d(gold_emb)
+        print(
+            f"[RUST_REVIEW] semantic_similarity_reward: pred_emb shape={pred_emb.shape}, gold_emb shape={gold_emb.shape}"
+        )
 
         # Cosine similarity via dot product of normalized embeddings
         sim = pred_emb @ gold_emb.T  # shape: [num_pred, num_gold]
+        print(f"[RUST_REVIEW] semantic_similarity_reward: sim matrix shape={sim.shape}")
 
         # Symmetric max matching: precision and recall components
         precision = float(sim.max(axis=1).mean())  # each pred matched to best gold

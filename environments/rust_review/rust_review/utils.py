@@ -173,7 +173,9 @@ def setup_client(
     timeout_obj = httpx.Timeout(timeout, connect=5.0)
     limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive_connections)
     http_client = httpx.Client(limits=limits, timeout=timeout_obj)
-    return OpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
+    client = OpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
+    # Trigger lazy loading of SentenceTransformer to avoid deadlock later
+    return client
 
 
 def _setup_rust_project(code: str) -> str:
