@@ -64,6 +64,7 @@ def load_environment(
     parser = CustomParser()
 
     def minimum_issues_found_reward(completion, **kwargs):
+        print("[RUST_REVIEW] minimum_issues_found_reward: start")
         """
         Counts the number of issues in 'gold_comments' in info of state
 
@@ -71,15 +72,21 @@ def load_environment(
         - Otherwise, reward 1.0 if the number of comments >= expected issues; else 0.0.
         """
         state = kwargs["state"]
+        print("[RUST_REVIEW] minimum_issues_found_reward: parsed state")
         gold_comments = state.get("info", {}).get("gold_comments", [])
 
         # Use parser to extract comments consistently
         comments = parser.parse_answer(completion)
+        print(f"[RUST_REVIEW] minimum_issues_found_reward: parsed comments={len(comments)} expected={len(gold_comments)}")
         expected_issues = len(gold_comments)
 
         if expected_issues == 0:
-            return 1.0 if len(comments) == 0 else 0.0
-        return 1.0 if len(comments) >= expected_issues else 0.0
+            result = 1.0 if len(comments) == 0 else 0.0
+            print(f"[RUST_REVIEW] minimum_issues_found_reward: returning {result}")
+            return result
+        result = 1.0 if len(comments) >= expected_issues else 0.0
+        print(f"[RUST_REVIEW] minimum_issues_found_reward: returning {result}")
+        return result
 
     _st_lock = threading.Lock()
     _st_model = {"model": None}
@@ -126,6 +133,7 @@ def load_environment(
                 return None
 
     def semantic_similarity_reward(completion, **kwargs):
+        print("[RUST_REVIEW] semantic_similarity_reward: start")
         """
         Returns semantic similarity between predicted and gold comments as a scalar in [0, 1].
         Uses symmetric max-cosine matching (average of per-side maxima).
@@ -134,7 +142,9 @@ def load_environment(
 
         state = kwargs["state"]
         pred_comments_raw = parser.parse_answer(completion)
+        print(f"[RUST_REVIEW] semantic_similarity_reward: parsed pred={pred_comments_raw}")
         gold_comments_raw = state.get("info", {}).get("gold_comments", [])
+        print(f"[RUST_REVIEW] semantic_similarity_reward: gold={gold_comments_raw}")
 
         # Clean and validate comments
         pred_comments = [str(c).strip() for c in (pred_comments_raw or []) if isinstance(c, str) and str(c).strip()]
@@ -142,14 +152,17 @@ def load_environment(
 
         # If both are empty, perfect agreement
         if not pred_comments and not gold_comments:
+            print("[RUST_REVIEW] semantic_similarity_reward: returning 1.0 (both empty)")
             return 1.0
         # If only one side is empty, no semantic agreement
         if not pred_comments or not gold_comments:
+            print("[RUST_REVIEW] semantic_similarity_reward: returning 0.0 (one empty)")
             return 0.0
 
         pred_emb = _safe_encode(pred_comments)
         gold_emb = _safe_encode(gold_comments)
         if pred_emb is None or gold_emb is None:
+            print("[RUST_REVIEW] semantic_similarity_reward: encode failed -> 0.0")
             return 0.0
 
         # Ensure 2D arrays
@@ -163,10 +176,12 @@ def load_environment(
         precision = float(sim.max(axis=1).mean())  # each pred matched to best gold
         recall = float(sim.max(axis=0).mean())  # each gold matched to best pred
         score = (precision + recall) / 2.0
+        print(f"[RUST_REVIEW] semantic_similarity_reward: returning {score}")
         # Bound to [0, 1]
         return max(0.0, min(1.0, score))
 
     def crystalbleu_reward(completion, **kwargs):
+        print("[RUST_REVIEW] crystalbleu_reward: start")
         """CoRAL-style reward: Compare refined code with ground truth using CrystalBLEU"""
         import re
         from collections import Counter
@@ -177,12 +192,15 @@ def load_environment(
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
+        print("[RUST_REVIEW] crystalbleu_reward: got refined_code" if refined_code else "[RUST_REVIEW] crystalbleu_reward: no refined_code")
         if not refined_code:
             # If no refined code (should be rare now), return 0.0 instead of raising
+            print("[RUST_REVIEW] crystalbleu_reward: returning 0.0 (no refined code)")
             return 0.0
 
         gold_code = state.get("info", {}).get("gold_code", "")
         if not gold_code:
+            print("[RUST_REVIEW] crystalbleu_reward: missing gold_code")
             raise ValueError("Missing gold_code in state.info for CrystalBLEU computation.")
 
         def simple_ngrams(tokens, n):
@@ -226,38 +244,51 @@ def load_environment(
         candidates = [refined_tokens]
 
         crystalbleu_score = corpus_bleu(references, candidates, ignoring=trivially_shared_ngrams)
-
-        return float(crystalbleu_score)
+        result = float(crystalbleu_score)
+        print(f"[RUST_REVIEW] crystalbleu_reward: returning {result}")
+        return result
 
     def cargo_build_reward(completion, **kwargs):
+        print("[RUST_REVIEW] cargo_build_reward: start")
         """Reward for successful compilation after applying review comments"""
         state = kwargs["state"]
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
+        print("[RUST_REVIEW] cargo_build_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_build_reward: no refined_code")
         if not refined_code:
             return 0.0
-        return 1.0 if run_cargo_build(refined_code) else 0.0
+        result = 1.0 if run_cargo_build(refined_code) else 0.0
+        print(f"[RUST_REVIEW] cargo_build_reward: returning {result}")
+        return result
 
     def cargo_test_reward(completion, **kwargs):
+        print("[RUST_REVIEW] cargo_test_reward: start")
         """Reward for tests passing after applying review comments"""
         state = kwargs["state"]
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
+        print("[RUST_REVIEW] cargo_test_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_test_reward: no refined_code")
         if not refined_code:
             return 0.0
-        return 1.0 if run_cargo_tests(refined_code) else 0.0
+        result = 1.0 if run_cargo_tests(refined_code) else 0.0
+        print(f"[RUST_REVIEW] cargo_test_reward: returning {result}")
+        return result
 
     def cargo_clippy_reward(completion, **kwargs):
+        print("[RUST_REVIEW] cargo_clippy_reward: start")
         """Reward for fewer clippy warnings after applying review comments"""
         state = kwargs["state"]
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
+        print("[RUST_REVIEW] cargo_clippy_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_clippy_reward: no refined_code")
         if not refined_code:
             return 0.0
-        return 1.0 if run_cargo_clippy(refined_code) else 0.0
+        result = 1.0 if run_cargo_clippy(refined_code) else 0.0
+        print(f"[RUST_REVIEW] cargo_clippy_reward: returning {result}")
+        return result
 
     # Reward ordering and weights prioritize correctness-based signals per the paper:
     # - CrystalBLEU (refined vs gold) carries highest weight among correctness metrics

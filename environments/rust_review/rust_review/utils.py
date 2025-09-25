@@ -30,6 +30,7 @@ IMPORTANT: Apply only the exact changes mentioned in the review comments above. 
 
 
 def get_code_from_applied_comments(model, client, completion, state):
+    print("[RUST_REVIEW] get_code_from_applied_comments: start")
     """
     Lazy generation - only runs once per rollout.
     Gets the original code from state, extracts review comments from completion,
@@ -37,12 +38,14 @@ def get_code_from_applied_comments(model, client, completion, state):
     """
     # Check if we already generated the refined code (and it's not a cached None)
     if "refined_code" in state and state["refined_code"] is not None:
+        print("[RUST_REVIEW] get_code_from_applied_comments: returning cached refined code")
         return state["refined_code"]
 
     # Extract original code from the user prompt
     original_code = extract_rust_code_from_state(state)
     if not original_code:
         print("[DEBUG] No original code found in state")
+        print("[RUST_REVIEW] get_code_from_applied_comments: no original code")
         state["refined_code"] = None
         return None
 
@@ -51,9 +54,11 @@ def get_code_from_applied_comments(model, client, completion, state):
 
     parser = CustomParser()
     comments = parser.parse_answer(completion)
+    print(f"[RUST_REVIEW] get_code_from_applied_comments: parsed {len(comments) if comments else 0} comments")
 
     if not comments:
         print("[DEBUG] No review comments found; using original code as refined_code")
+        print("[RUST_REVIEW] get_code_from_applied_comments: no comments -> returning original")
         state["refined_code"] = original_code
         state["original_code"] = original_code
         state["comments_applied"] = []
@@ -65,6 +70,7 @@ def get_code_from_applied_comments(model, client, completion, state):
     try:
         # Call the coder model to apply the comments
         print(f"[DEBUG] Applying {len(comments)} review comments to code...")
+        print(f"[RUST_REVIEW] get_code_from_applied_comments: requesting model={model} comments={len(comments)}")
 
         response = client.chat.completions.create(
             model=model,  # You can make this configurable
@@ -82,16 +88,26 @@ def get_code_from_applied_comments(model, client, completion, state):
                 "Also:",
             ],  # Stop if model tries to add extra content
         )
+        print("[RUST_REVIEW] get_code_from_applied_comments: received response")
         refined_code_response = response.choices[0].message.content
+        print(
+            f"[RUST_REVIEW] get_code_from_applied_comments: response length={len(refined_code_response) if refined_code_response else 0}"
+        )
 
         # Extract the refined code from the response
         refined_code = extract_rust_code(refined_code_response)
+        print(
+            "[RUST_REVIEW] get_code_from_applied_comments: extracted refined code"
+            if refined_code
+            else "[RUST_REVIEW] get_code_from_applied_comments: failed to extract refined code"
+        )
 
         if refined_code:
             # Validate that changes seem reasonable (basic sanity check)
             original_lines = len(original_code.split("\n"))
             refined_lines = len(refined_code.split("\n"))
             line_diff = abs(refined_lines - original_lines)
+            print(f"[RUST_REVIEW] get_code_from_applied_comments: line_diff={line_diff}")
 
             # If the code changed dramatically, it might have made unauthorized changes
             if line_diff > len(comments) * 3:  # Allow up to 3 lines per comment
@@ -107,11 +123,13 @@ def get_code_from_applied_comments(model, client, completion, state):
             return refined_code
         else:
             print("[DEBUG] Failed to extract refined code from model response")
+            print("[RUST_REVIEW] get_code_from_applied_comments: returning None (no refined code)")
             state["refined_code"] = None
             return None
 
     except Exception as e:
         print(f"[DEBUG] Error applying comments: {e}")
+        print("[RUST_REVIEW] get_code_from_applied_comments: exception raised")
         state["refined_code"] = None
         return None
 
