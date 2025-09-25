@@ -1,9 +1,8 @@
 import os
 import threading
 
-from datasets import load_dataset
-
 import verifiers as vf
+from datasets import load_dataset
 
 from .custom_parser import CustomParser
 from .utils import (
@@ -66,17 +65,17 @@ def load_environment(
 
     def minimum_issues_found_reward(completion, **kwargs):
         """
-        Counts the number of issues in 'cargo_outputs in info' of state
+        Counts the number of issues in 'gold_comments' in info of state
 
-        - If no issues are expected (zero cargo_outputs), reward 1.0 only if the model returns zero comments.
+        - If no issues are expected (zero gold_comments), reward 1.0 only if the model returns zero comments.
         - Otherwise, reward 1.0 if the number of comments >= expected issues; else 0.0.
         """
         state = kwargs["state"]
-        cargo_outputs = state.get("info", {}).get("cargo_outputs", [])
+        gold_comments = state.get("info", {}).get("gold_comments", [])
 
         # Use parser to extract comments consistently
         comments = parser.parse_answer(completion)
-        expected_issues = len(cargo_outputs)
+        expected_issues = len(gold_comments)
 
         if expected_issues == 0:
             return 1.0 if len(comments) == 0 else 0.0

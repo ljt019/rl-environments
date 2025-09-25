@@ -49,4 +49,9 @@ ENDPOINTS = {
         "url": "https://openrouter.ai/api/v1",
         "key": "OPENROUTER_API_KEY",
     },
+    "qwen2.5-coder-3b": {
+        "model": "Qwen/Qwen2.5-Coder-3B-Instruct:nscale",
+        "url": "https://router.huggingface.co/v1",
+        "key": "HF_TOKEN",
+    },
 }
