@@ -136,33 +136,35 @@ def load_environment(
 
     def semantic_similarity_reward(completion, **kwargs):
         print("[RUST_REVIEW] semantic_similarity_reward: start")
-        """
-        Returns semantic similarity between predicted and gold comments as a scalar in [0, 1].
-        Uses symmetric max-cosine matching (average of per-side maxima).
-        """
-        import numpy as np
-
+        print(f"[RUST_REVIEW] semantic_similarity_reward: kwargs keys={list(kwargs.keys())}")
         state = kwargs["state"]
+        print("[RUST_REVIEW] semantic_similarity_reward: state retrieved")
+
         pred_comments_raw = parser.parse_answer(completion)
         print(f"[RUST_REVIEW] semantic_similarity_reward: parsed pred={pred_comments_raw}")
         gold_comments_raw = state.get("info", {}).get("gold_comments", [])
         print(f"[RUST_REVIEW] semantic_similarity_reward: gold={gold_comments_raw}")
 
-        # Clean and validate comments
+        print("[RUST_REVIEW] semantic_similarity_reward: cleaning comments")
         pred_comments = [str(c).strip() for c in (pred_comments_raw or []) if isinstance(c, str) and str(c).strip()]
         gold_comments = [str(c).strip() for c in (gold_comments_raw or []) if isinstance(c, str) and str(c).strip()]
+        print(
+            f"[RUST_REVIEW] semantic_similarity_reward: cleaned pred count={len(pred_comments)} gold count={len(gold_comments)}"
+        )
 
-        # If both are empty, perfect agreement
         if not pred_comments and not gold_comments:
             print("[RUST_REVIEW] semantic_similarity_reward: returning 1.0 (both empty)")
             return 1.0
-        # If only one side is empty, no semantic agreement
         if not pred_comments or not gold_comments:
             print("[RUST_REVIEW] semantic_similarity_reward: returning 0.0 (one empty)")
             return 0.0
 
+        print("[RUST_REVIEW] semantic_similarity_reward: calling _safe_encode for pred")
         pred_emb = _safe_encode(pred_comments)
+        print("[RUST_REVIEW] semantic_similarity_reward: _safe_encode pred returned")
+        print("[RUST_REVIEW] semantic_similarity_reward: calling _safe_encode for gold")
         gold_emb = _safe_encode(gold_comments)
+        print("[RUST_REVIEW] semantic_similarity_reward: _safe_encode gold returned")
         print(
             f"[RUST_REVIEW] semantic_similarity_reward: pred_emb type={type(pred_emb)}, gold_emb type={type(gold_emb)}"
         )
@@ -170,23 +172,23 @@ def load_environment(
             print("[RUST_REVIEW] semantic_similarity_reward: encode failed -> 0.0")
             return 0.0
 
-        # Ensure 2D arrays
+        import numpy as np
+
+        print("[RUST_REVIEW] semantic_similarity_reward: converting embeddings to 2D arrays")
         pred_emb = np.atleast_2d(pred_emb)
         gold_emb = np.atleast_2d(gold_emb)
         print(
             f"[RUST_REVIEW] semantic_similarity_reward: pred_emb shape={pred_emb.shape}, gold_emb shape={gold_emb.shape}"
         )
 
-        # Cosine similarity via dot product of normalized embeddings
-        sim = pred_emb @ gold_emb.T  # shape: [num_pred, num_gold]
+        print("[RUST_REVIEW] semantic_similarity_reward: computing similarity matrix")
+        sim = pred_emb @ gold_emb.T
         print(f"[RUST_REVIEW] semantic_similarity_reward: sim matrix shape={sim.shape}")
 
-        # Symmetric max matching: precision and recall components
-        precision = float(sim.max(axis=1).mean())  # each pred matched to best gold
-        recall = float(sim.max(axis=0).mean())  # each gold matched to best pred
+        precision = float(sim.max(axis=1).mean())
+        recall = float(sim.max(axis=0).mean())
         score = (precision + recall) / 2.0
-        print(f"[RUST_REVIEW] semantic_similarity_reward: returning {score}")
-        # Bound to [0, 1]
+        print(f"[RUST_REVIEW] semantic_similarity_reward: precision={precision} recall={recall} score={score}")
         return max(0.0, min(1.0, score))
 
     def crystalbleu_reward(completion, **kwargs):
