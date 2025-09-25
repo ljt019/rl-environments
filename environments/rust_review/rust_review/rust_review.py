@@ -1,8 +1,9 @@
 import os
 import threading
 
-import verifiers as vf
 from datasets import load_dataset
+
+import verifiers as vf
 
 from .custom_parser import CustomParser
 from .utils import (
@@ -77,7 +78,9 @@ def load_environment(
 
         # Use parser to extract comments consistently
         comments = parser.parse_answer(completion)
-        print(f"[RUST_REVIEW] minimum_issues_found_reward: parsed comments={len(comments)} expected={len(gold_comments)}")
+        print(
+            f"[RUST_REVIEW] minimum_issues_found_reward: parsed comments={len(comments)} expected={len(gold_comments)}"
+        )
         expected_issues = len(gold_comments)
 
         if expected_issues == 0:
@@ -192,7 +195,11 @@ def load_environment(
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
-        print("[RUST_REVIEW] crystalbleu_reward: got refined_code" if refined_code else "[RUST_REVIEW] crystalbleu_reward: no refined_code")
+        print(
+            "[RUST_REVIEW] crystalbleu_reward: got refined_code"
+            if refined_code
+            else "[RUST_REVIEW] crystalbleu_reward: no refined_code"
+        )
         if not refined_code:
             # If no refined code (should be rare now), return 0.0 instead of raising
             print("[RUST_REVIEW] crystalbleu_reward: returning 0.0 (no refined code)")
@@ -255,7 +262,11 @@ def load_environment(
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
-        print("[RUST_REVIEW] cargo_build_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_build_reward: no refined_code")
+        print(
+            "[RUST_REVIEW] cargo_build_reward: got refined_code"
+            if refined_code
+            else "[RUST_REVIEW] cargo_build_reward: no refined_code"
+        )
         if not refined_code:
             return 0.0
         result = 1.0 if run_cargo_build(refined_code) else 0.0
@@ -269,7 +280,11 @@ def load_environment(
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
-        print("[RUST_REVIEW] cargo_test_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_test_reward: no refined_code")
+        print(
+            "[RUST_REVIEW] cargo_test_reward: got refined_code"
+            if refined_code
+            else "[RUST_REVIEW] cargo_test_reward: no refined_code"
+        )
         if not refined_code:
             return 0.0
         result = 1.0 if run_cargo_tests(refined_code) else 0.0
@@ -283,7 +298,11 @@ def load_environment(
         refined_code = get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
-        print("[RUST_REVIEW] cargo_clippy_reward: got refined_code" if refined_code else "[RUST_REVIEW] cargo_clippy_reward: no refined_code")
+        print(
+            "[RUST_REVIEW] cargo_clippy_reward: got refined_code"
+            if refined_code
+            else "[RUST_REVIEW] cargo_clippy_reward: no refined_code"
+        )
         if not refined_code:
             return 0.0
         result = 1.0 if run_cargo_clippy(refined_code) else 0.0
