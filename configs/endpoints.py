@@ -34,6 +34,11 @@ ENDPOINTS = {
         "url": "https://openrouter.ai/api/v1",
         "key": "OPENROUTER_API_KEY",
     },
+    "gpt-5-codex": {
+        "model": "openai/gpt-5-codex",
+        "url": "https://openrouter.ai/api/v1",
+        "key": "OPENROUTER_API_KEY",
+    },
     "kimi-k2": {
         "model": "moonshotai/kimi-k2-0905",
         "url": "https://openrouter.ai/api/v1",

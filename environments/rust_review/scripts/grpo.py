@@ -3,14 +3,14 @@ from environments.rust_review.rust_review import load_environment
 
 ############## Training Config ##############
 
-MODEL_NAME = "ljt019/Qwen2.5-Coder-1.5B-Instruct-rust"
-CODER_MODEL = "qwen/qwen3-coder-flash"
+MODEL_NAME = "Qwen/Qwen2.5-Coder-3B-Instruct"
+REVIEW_APPLICATOR_MODEL = "openai/gpt-4.1-nano"
 
-RUN_NAME = "rust-review-grpo-230825"
+RUN_NAME = "rust-review-grpo-250925"
 
 #############################################
 
-env = load_environment(coder_model=CODER_MODEL)
+env = load_environment(review_applicator_model=REVIEW_APPLICATOR_MODEL)
 
 model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 

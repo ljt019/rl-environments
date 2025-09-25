@@ -2,7 +2,7 @@
 
 ############## Training Config ##############
 
-CUDA_VISIBLE_DEVICES="1"
+CUDA_VISIBLE_DEVICES="2,3"
 
 #############################################
 

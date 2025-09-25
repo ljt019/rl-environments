@@ -25,34 +25,34 @@ Focus on the most important issues first. Be constructive and educational.
 
 
 def load_environment(
-    coder_model: str,
-    coder_base_url: str = "https://openrouter.ai/api/v1",
-    coder_api_key: str | None = None,
+    review_applicator_model: str,
+    review_applicator_base_url: str = "https://openrouter.ai/api/v1",
+    review_applicator_api_key: str | None = None,
     dataset_name: str = "ljt019/rust-review-singleturn-3250",
 ) -> vf.SingleTurnEnv:
     """
     Load the rust code review environment.
 
     Args:
-        coder_model: Model name for the code reviewer LLM
-        coder_base_url: Base URL for the coder LLM API (defaults to OpenRouter)
-        coder_api_key: API key for the coder LLM (if None, uses OPENAI_API_KEY env var)
+        review_applicator_model: Model name for the review applicator LLM
+        review_applicator_base_url: Base URL for the review applicator LLM API (defaults to OpenRouter)
+        review_applicator_api_key: API key for the review applicator LLM (if None, uses OPENROUTER_API_KEY env var)
 
     Returns:
         SingleTurnEnv: The configured rust review environment
 
     Environment Variables:
-        OPENAI_API_KEY: API key for the coder LLM (used if coder_api_key is None)
+        OPENROUTER_API_KEY: API key for the review applicator LLM (used if review_applicator_api_key is None)
     """
-    api_key = coder_api_key or os.getenv("OPENROUTER_API_KEY")
+    api_key = review_applicator_api_key or os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError(
-            "API key is required for the answerer LLM. "
-            "Either provide answerer_api_key parameter or set OPENAI_API_KEY environment variable."
+            "API key is required for the review applicator LLM. "
+            "Either provide review_applicator_api_key parameter or set OPENROUTER_API_KEY environment variable."
         )
 
-    coder_client = setup_client(
-        api_base_url=coder_base_url,
+    review_applicator_client = setup_client(
+        api_base_url=review_applicator_base_url,
         api_key=api_key,
         timeout=600.0,
         max_connections=100,
@@ -175,7 +175,9 @@ def load_environment(
         from .crystalbleu_local import corpus_bleu
 
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(coder_model, coder_client, completion, state)
+        refined_code = get_code_from_applied_comments(
+            review_applicator_model, review_applicator_client, completion, state
+        )
         if not refined_code:
             # If no refined code (should be rare now), return 0.0 instead of raising
             return 0.0
@@ -231,7 +233,9 @@ def load_environment(
     def cargo_build_reward(completion, **kwargs):
         """Reward for successful compilation after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(coder_model, coder_client, completion, state)
+        refined_code = get_code_from_applied_comments(
+            review_applicator_model, review_applicator_client, completion, state
+        )
         if not refined_code:
             return 0.0
         return 1.0 if run_cargo_build(refined_code) else 0.0
@@ -239,7 +243,9 @@ def load_environment(
     def cargo_test_reward(completion, **kwargs):
         """Reward for tests passing after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(coder_model, coder_client, completion, state)
+        refined_code = get_code_from_applied_comments(
+            review_applicator_model, review_applicator_client, completion, state
+        )
         if not refined_code:
             return 0.0
         return 1.0 if run_cargo_tests(refined_code) else 0.0
@@ -247,7 +253,9 @@ def load_environment(
     def cargo_clippy_reward(completion, **kwargs):
         """Reward for fewer clippy warnings after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(coder_model, coder_client, completion, state)
+        refined_code = get_code_from_applied_comments(
+            review_applicator_model, review_applicator_client, completion, state
+        )
         if not refined_code:
             return 0.0
         return 1.0 if run_cargo_clippy(refined_code) else 0.0
