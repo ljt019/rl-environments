@@ -67,6 +67,7 @@ def get_code_from_applied_comments(model, client, completion, state):
         print(f"[DEBUG] Applying {len(comments)} review comments to code...")
 
         import asyncio
+        import concurrent.futures
 
         async def apply_comments():
             response = await client.chat.completions.create(
@@ -89,13 +90,25 @@ def get_code_from_applied_comments(model, client, completion, state):
 
         # Handle both sync and async contexts
         try:
-            asyncio.get_running_loop()
-            import concurrent.futures
+            # Check if we're in an async context
+            loop = asyncio.get_running_loop()
+            # If we're in an async context, we need to run in a thread to avoid blocking
+
+            def run_in_new_loop():
+                # Create a new event loop for this thread
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(apply_comments())
+                finally:
+                    new_loop.close()
+                    asyncio.set_event_loop(None)
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, apply_comments())
-                refined_code_response = future.result()
+                future = executor.submit(run_in_new_loop)
+                refined_code_response = future.result(timeout=300)  # 5 minute timeout
         except RuntimeError:
+            # No event loop running, we can use asyncio.run directly
             refined_code_response = asyncio.run(apply_comments())
 
         # Extract the refined code from the response
@@ -124,6 +137,10 @@ def get_code_from_applied_comments(model, client, completion, state):
             state["refined_code"] = None
             return None
 
+    except concurrent.futures.TimeoutError:
+        print("[DEBUG] Timeout while applying review comments (>5 minutes)")
+        state["refined_code"] = None
+        return None
     except Exception as e:
         print(f"[DEBUG] Error applying comments: {e}")
         state["refined_code"] = None
