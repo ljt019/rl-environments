@@ -1,5 +1,5 @@
 import httpx
-from openai import AsyncOpenAI
+from openai import OpenAI
 
 CODER_SYSTEM_PROMPT = """
 You are a code editor that applies ONLY the specific changes mentioned in review comments. You must:
@@ -66,43 +66,23 @@ def get_code_from_applied_comments(model, client, completion, state):
         # Call the coder model to apply the comments
         print(f"[DEBUG] Applying {len(comments)} review comments to code...")
 
-        import asyncio
-        import concurrent.futures
-
-        async def apply_comments():
-            response = await client.chat.completions.create(
-                model=model,  # You can make this configurable
-                messages=[
-                    {"role": "system", "content": CODER_SYSTEM_PROMPT},
-                    {"role": "user", "content": CODER_PROMPT.format(code=original_code, comments=comments_text)},
-                ],
-                temperature=0.0,  # Use temperature=0.0 for maximum consistency
-                max_tokens=4000,
-                # Add additional constraints
-                stop=[
-                    "\n\n```",
-                    "Additional improvements:",
-                    "Note:",
-                    "Also:",
-                ],  # Stop if model tries to add extra content
-            )
-            return response.choices[0].message.content
-
-        # Handle both sync and async contexts
-        try:
-            # Check if we're in an async context
-            loop = asyncio.get_running_loop()
-            # If we're in an async context, we need to run in a thread to avoid blocking
-
-            def run_in_loop():
-                future = asyncio.run_coroutine_threadsafe(apply_comments(), loop)
-                return future.result(timeout=300)  # 5 minute timeout
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                refined_code_response = executor.submit(run_in_loop).result()
-        except RuntimeError:
-            # No event loop running, we can use asyncio.run directly
-            refined_code_response = asyncio.run(apply_comments())
+        response = client.chat.completions.create(
+            model=model,  # You can make this configurable
+            messages=[
+                {"role": "system", "content": CODER_SYSTEM_PROMPT},
+                {"role": "user", "content": CODER_PROMPT.format(code=original_code, comments=comments_text)},
+            ],
+            temperature=0.0,  # Use temperature=0.0 for maximum consistency
+            max_tokens=4000,
+            # Add additional constraints
+            stop=[
+                "\n\n```",
+                "Additional improvements:",
+                "Note:",
+                "Also:",
+            ],  # Stop if model tries to add extra content
+        )
+        refined_code_response = response.choices[0].message.content
 
         # Extract the refined code from the response
         refined_code = extract_rust_code(refined_code_response)
@@ -130,10 +110,6 @@ def get_code_from_applied_comments(model, client, completion, state):
             state["refined_code"] = None
             return None
 
-    except concurrent.futures.TimeoutError:
-        print("[DEBUG] Timeout while applying review comments (>5 minutes)")
-        state["refined_code"] = None
-        return None
     except Exception as e:
         print(f"[DEBUG] Error applying comments: {e}")
         state["refined_code"] = None
@@ -178,8 +154,8 @@ def setup_client(
 ):
     timeout_obj = httpx.Timeout(timeout, connect=5.0)
     limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive_connections)
-    http_client = httpx.AsyncClient(limits=limits, timeout=timeout_obj)
-    return AsyncOpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
+    http_client = httpx.Client(limits=limits, timeout=timeout_obj)
+    return OpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
 
 
 def _setup_rust_project(code: str) -> str:
