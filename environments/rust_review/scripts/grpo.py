@@ -1,4 +1,6 @@
 import verifiers as vf
+
+vf.setup_logging(level="DEBUG")
 from environments.rust_review.rust_review import load_environment
 
 ############## Training Config ##############
