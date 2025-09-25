@@ -95,43 +95,56 @@ def load_environment(
     _st_model = {"model": None}
 
     def _get_st_model():
+        print("[RUST_REVIEW] _get_st_model: entered")
+        from sentence_transformers import SentenceTransformer
+
         with _st_lock:
             if _st_model["model"] is None:
-                from sentence_transformers import SentenceTransformer
-
+                print("[RUST_REVIEW] _get_st_model: loading SentenceTransformer all-MiniLM-L6-v2 on CPU")
                 model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
                 _st_model["model"] = model
+                print("[RUST_REVIEW] _get_st_model: model loaded")
+            else:
+                print("[RUST_REVIEW] _get_st_model: reusing cached model")
             return _st_model["model"]
 
     def _safe_encode(texts):
         import numpy as np
-        from sentence_transformers import SentenceTransformer
 
-        def _encode_current(t):
-            model = _get_st_model()
-            print(f"[RUST_REVIEW] _safe_encode: encoding {len(t)} texts with device={model.device}")
+        print(f"[RUST_REVIEW] _safe_encode: called with {len(texts)} texts")
+        model = _get_st_model()
+        print(f"[RUST_REVIEW] _safe_encode: model device={model.device}")
+        try:
+            print("[RUST_REVIEW] _safe_encode: invoking model.encode")
             emb = model.encode(
-                t,
+                texts,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
                 batch_size=32,
                 show_progress_bar=False,
             )
-            print("[RUST_REVIEW] _safe_encode: encoding complete")
+            print("[RUST_REVIEW] _safe_encode: encode complete")
             return np.atleast_2d(emb)
+        except Exception as exc:
+            print(f"[RUST_REVIEW] _safe_encode: encode failed with {exc}, retrying on CPU")
+            from sentence_transformers import SentenceTransformer
 
-        try:
-            return _encode_current(texts)
-        except Exception:
-            # Fallback: reinitialize on CPU and retry once
-            print("[RUST_REVIEW] _safe_encode: encoding failed, retrying on CPU")
             with _st_lock:
                 _st_model["model"] = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+                model = _st_model["model"]
             try:
-                print("[RUST_REVIEW] _safe_encode: retry encode on CPU")
-                return _encode_current(texts)
-            except Exception:
-                print("[RUST_REVIEW] _safe_encode: retry failed")
+                print("[RUST_REVIEW] _safe_encode: retrying encode")
+                emb = model.encode(
+                    texts,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    batch_size=32,
+                    show_progress_bar=False,
+                )
+                print("[RUST_REVIEW] _safe_encode: retry encode complete")
+                return np.atleast_2d(emb)
+            except Exception as exc_retry:
+                print(f"[RUST_REVIEW] _safe_encode: retry failed with {exc_retry}")
                 return None
 
     def semantic_similarity_reward(completion, **kwargs):
@@ -139,7 +152,6 @@ def load_environment(
         print(f"[RUST_REVIEW] semantic_similarity_reward: kwargs keys={list(kwargs.keys())}")
         state = kwargs["state"]
         print("[RUST_REVIEW] semantic_similarity_reward: state retrieved")
-
         pred_comments_raw = parser.parse_answer(completion)
         print(f"[RUST_REVIEW] semantic_similarity_reward: parsed pred={pred_comments_raw}")
         gold_comments_raw = state.get("info", {}).get("gold_comments", [])
@@ -153,10 +165,8 @@ def load_environment(
         )
 
         if not pred_comments and not gold_comments:
-            print("[RUST_REVIEW] semantic_similarity_reward: returning 1.0 (both empty)")
             return 1.0
         if not pred_comments or not gold_comments:
-            print("[RUST_REVIEW] semantic_similarity_reward: returning 0.0 (one empty)")
             return 0.0
 
         print("[RUST_REVIEW] semantic_similarity_reward: calling _safe_encode for pred")
