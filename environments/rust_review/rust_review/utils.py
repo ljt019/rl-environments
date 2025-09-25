@@ -94,19 +94,12 @@ def get_code_from_applied_comments(model, client, completion, state):
             loop = asyncio.get_running_loop()
             # If we're in an async context, we need to run in a thread to avoid blocking
 
-            def run_in_new_loop():
-                # Create a new event loop for this thread
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    return new_loop.run_until_complete(apply_comments())
-                finally:
-                    new_loop.close()
-                    asyncio.set_event_loop(None)
+            def run_in_loop():
+                future = asyncio.run_coroutine_threadsafe(apply_comments(), loop)
+                return future.result(timeout=300)  # 5 minute timeout
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_new_loop)
-                refined_code_response = future.result(timeout=300)  # 5 minute timeout
+                refined_code_response = executor.submit(run_in_loop).result()
         except RuntimeError:
             # No event loop running, we can use asyncio.run directly
             refined_code_response = asyncio.run(apply_comments())
