@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -9,46 +10,221 @@ import subprocess
 import time
 import uuid
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Deque, Literal, Optional
+from typing import Any, Deque, Dict, Literal, Optional
 
 from datasets import Dataset, load_dataset
-from openai import OpenAI
+from datasets.exceptions import DatasetNotFoundError
+from openai import AsyncOpenAI
 from rust_review import custom_parser
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 
-CODE_WRITER_SYSTEM_PROMPT = """You are a junior Rust developer who makes common programming mistakes. Given the following question, write a Rust function that attempts to complete the task but contains bugs. Do NOT write perfect code - you must introduce realistic bugs that cargo tools would catch. Then write unit tests for the function you defined. Write multiple unit tests for the function. The tests should be a simple line delimited list of assert! or assert_eq! statements. When writing the unit tests you can have comments specifying what you are testing in plain english. The tests should use super::*. CRITICAL: You MUST introduce bugs into your code. Do NOT write perfect code. Your code should always contain bugs and logical issues that cargo clippy, cargo build, or cargo test would catch."""
+CODE_WRITER_SYSTEM_PROMPT = """
+You are a junior Rust developer who makes common programming mistakes. Given the following question, write a Rust function that attempts to complete the task but contains bugs. Do NOT write perfect code - you must introduce realistic bugs that cargo tools would catch.
+
+Then write unit tests for the function you defined. Write multiple unit tests for the function. The tests should be a simple line delimited list of assert! or assert_eq! statements. When writing the unit tests you can have comments specifying what you are testing in plain english. The tests should use super::*.
+
+An example output should look like the following:
+
+```rust
+/// Find the maximum value in a vector
+/// Returns the largest element
+fn find_max(numbers: Vec<i32>) -> i32 {
+    let mut max_val = 0;  // Bug: should initialize to first element or i32::MIN
+    for num in numbers {
+        if num >= max_val {  // Bug: should be > for proper comparison
+            max_val = num;
+        }
+    }
+    max_val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_max() {
+        // Test with positive numbers
+        assert_eq!(find_max(vec![1, 5, 3, 9, 2]), 9);
+        // Test with negative numbers
+        assert_eq!(find_max(vec![-5, -1, -10, -3]), -1);
+        // Test with single element
+        assert_eq!(find_max(vec![42]), 42);
+    }
+}
+```
+
+CRITICAL: You MUST introduce bugs into your code. Do NOT write perfect code. Your code should always contain bugs and logical issues that cargo clippy, cargo build, or cargo test would catch.
+
+Examples of bugs to include:
+- Null pointer dereferences and uninitialized variables
+- Buffer overflows and memory leaks
+- Race conditions in concurrent code
+- Integer overflow and underflow errors
+- Logic errors in conditionals and loops
+
+The tests should be correct and would pass if the function were implemented properly.
+
+Make sure to only respond with a single  ```rust``` block. The unit tests must be defined inside the mod tests {} module. Make sure to import any standard library modules that you need. Do not add a main function.
+"""
 
 
-CARGO_OUTPUT_CONVERTER_SYSTEM_PROMPT = """You are a helpful code reviewer. Given some code and a list of cargo diagnostic outputs (from cargo test/clippy/build), convert them into clear, actionable code review comments."""
+CODE_REVIEWER_SYSTEM_PROMPT = """
+You are a thoughtful human code reviewer. You are given Rust code plus internal notes about failing cargo checks. Treat the notes as private hints, not content to repeat. Do NOT reference cargo, clippy, test names, panic traces, or diagnostic IDs. Write review comments exactly as if you noticed the issues by reading the code yourself.
+
+Instructions:
+1. For each unique issue hinted at by the notes (and any severe bug you spot), write exactly one concise review comment.
+2. Explain the problem in your own words, grounded in code-understandable symptoms. Mention relevant lines or behaviors; do not echo the diagnostic text.
+3. Offer actionable advice—briefly describe how to fix or improve the code. Small snippets are fine if they clarify the fix.
+4. After covering the hinted issues, take a quick pass for any additional bug you can confidently infer from the code alone. Add an extra comment only if it’s clearly high-value; it’s fine to leave none.
+5. Skip nits or subjective style tweaks. If nothing significant is wrong, return an empty review.
+
+Follow this format exactly:
+{format_str}
+
+Example 1 (extra bug spotted):
+<think>
+The hints flag an out-of-bounds access in the loop. While scanning the code I also notice the accumulator never resets, which will corrupt later iterations.
+</think>
+
+<review>
+<comment>**Bounds check (line 27)**: `values[i + 1]` is read without confirming `i + 1 < values.len()`. On the final iteration this will panic. Guard the access or stop the loop earlier.</comment>
+<comment>**Accumulator reset (line 33)**: `sum` carries over between outer iterations. Initialize it to zero inside the loop so each pass works from a clean slate.</comment>
+</review>
+
+Example 2 (no additional issues):
+<think>
+The hint about the unused variable checks out. After reviewing the rest of the function, I don't see any other substantive bugs worth flagging.
+</think>
+
+<review>
+<comment>**Remove unused variable (line 12)**: `buffer_len` is never read, so it just adds noise. Drop the binding or use it where it adds value.</comment>
+</review>
+
+Example 3 (nothing worth flagging):
+<think>
+The notes are empty. I read through the helper function and nothing jumps out as unsafe or incorrect, so I'll leave the review blank.
+</think>
+
+<review>
+</review>
+
+Example 4 (two hinted issues only):
+<think>
+Both hints identify real problems: one is an off-by-one in the loop bounds, the other a panic from `unwrap`. I'll echo those fixes and stop there.
+</think>
+
+<review>
+<comment>**Loop upper bound (line 18)**: Iterating with `<= items.len()` runs one step past the vector and will panic. Use `< items.len()` so the final index stays in range.</comment>
+<comment>**Unchecked unwrap (line 26)**: Calling `value.unwrap()` will panic when the parse fails. Handle the `Err` case explicitly—return an error or fall back to a default instead of unwrapping.</comment>
+</review>
+
+Example 5 (extra bug when hints are absent):
+<think>
+No diagnostics were provided, but while reading I noticed `denominator` can stay zero before division. That's a runtime crash worth surfacing.
+</think>
+
+<review>
+<comment>**Guard division (line 31)**: `denominator` starts at zero and is never updated when the filter doesn't match, so `total / denominator` will panic. Return early or bail out when the denominator remains zero.</comment>
+</review>
+
+Example 6 (rewrite lint-style hints in plain English):
+<think>
+The notes complain about cloning and needless borrows. They're real inefficiencies, so I'll translate them into a concise performance review.
+</think>
+
+<review>
+<comment>**Avoid the extra clone (line 14)**: `names.clone()` copies the entire vector even though you only read from it. Iterate over `&names` directly to skip the duplication.</comment>
+<comment>**Borrow directly (line 21)**: `path.push_str(&segment)` takes `&&str` before writing. Call `push_str(segment)` so you borrow just once.</comment>
+</review>
+
+Example 7 (merge similar hints):
+<think>
+Two hints point to redundant `clone()` calls on the same data structure. I'll summarize them together so the developer sees it as one cleanup.
+</think>
+
+<review>
+<comment>**Drop redundant clones (lines 18-22)**: `records.clone()` and `records.clone().iter()` each duplicate the vector even though you only read from it. Iterate over `&records` and reuse the borrowed items instead of cloning twice.</comment>
+</review>
+
+Example 8 (actionable fix with snippet):
+<think>
+The diagnostics note a borrow checker error and a panic from unchecked indexing. Both stem from mutating the vector while iterating. I'll explain the root cause and sketch the safe pattern.
+</think>
+
+<review>
+<comment>**Mutate after collecting (lines 30-38)**: `for item in items { items.push(process(item)); }` re-borrows `items` mutably while it’s already borrowed for iteration, which triggers the borrow error and can even panic when the length changes mid-loop. Collect the processed values into a temporary vector and extend afterward, e.g.
+
+```rust
+let processed: Vec<_> = items.iter().map(process).collect();
+items.extend(processed);
+```
+
+This keeps the original iteration immutable and avoids the runtime crash.</comment>
+</review>
+"""
 
 
-CODER_SYSTEM_PROMPT = """You are a code editor that applies ONLY the specific changes mentioned in review comments."""
+REVIEW_APPLICATOR_SYSTEM_PROMPT = """
+You are a code editor that applies ONLY the specific changes mentioned in review comments. You must:
+
+CRITICAL RULES:
+1. Apply ONLY the exact changes specified in the review comments
+2. Do NOT make any additional improvements, optimizations, or fixes beyond what's explicitly mentioned
+3. Do NOT add new functionality, change variable names, or restructure code unless specifically requested
+4. Do NOT fix other issues you might notice - only address the exact feedback given
+5. If a comment is unclear or impossible to implement, leave that part of the code unchanged
+
+Your job is to be a precise code editor, not a code improver. Apply the minimum changes necessary to address the specific feedback.
+
+Return ONLY the modified Rust code in a single ```rust code block. Do not include explanations.
+"""
 
 
-CODER_PROMPT = """Original Code:\n```rust\n{code}\n```\n\nReview Comments (apply ONLY these specific changes):\n{comments}\n\nIMPORTANT: Apply only the exact changes mentioned in the review comments above. Do not make any other modifications to the code. Return the minimally modified code in a ```rust block."""
+REVIEW_APPLICATOR_PROMPT = """
+Original Code:
+```rust
+{code}
+```
+
+Review Comments (apply ONLY these specific changes):
+{comments}
+
+IMPORTANT: Apply only the exact changes mentioned in the review comments above. Do not make any other modifications to the code. Return the minimally modified code in a ```rust block.
+"""
 
 
 @dataclass
 class Config:
     code_writer_model: str = "openai/gpt-4.1-nano"
-    review_comment_model: str = "openai/gpt-5-mini"
-    code_fixer_model: str = "openai/gpt-4.1-nano"
+    code_reviewer_model: str = "x-ai/grok-4"
+    review_applicator_model: str = "openai/gpt-4.1-nano"
+    code_writer_temperature: float = 0.1
+    code_reviewer_temperature: float = 0.1
+    review_applicator_temperature: float = 0.0
+    code_writer_max_tokens: int = 4000
+    code_reviewer_max_tokens: int = 4000
+    review_applicator_max_tokens: int = 4000
     base_url: str = "https://openrouter.ai/api/v1"
     num_examples: int = 10_000
     no_comment_ratio: float = 0.1
     dataset_id: str = "ljt019/rust-17000"
-    target_dataset_hub: str = "ljt019/rust-review-coral"
+    target_dataset_hub: str = "ljt019/rust-review-hq"
     outputs_base_dir: str = field(default_factory=lambda: os.path.join("outputs", "tests"))
     cargo_timeout: int = 180
     cargo_test_timeout: int = 60
     llm_retry_attempts: int = 3
     llm_retry_backoff: int = 30
     reprocess_retry_limit: int = 6
-    checkpoint_every: int = 250
+    checkpoint_every: int = 50
+    enable_timing: bool = True
+    timing_log_every: int = 1
+    max_concurrent_api_calls: int = 10
 
 
 @dataclass
@@ -87,7 +263,9 @@ class CargoDiagnostics:
 @dataclass
 class PipelineContext:
     config: Config
-    client: OpenAI
+    client: AsyncOpenAI
+    timer: Optional["TimingCollector"] = None
+    api_semaphore: Optional[asyncio.Semaphore] = None
 
 
 REVIEW_PROMPT_TEMPLATE = """Please review the following code and provide feedback on any issues you find.
@@ -112,22 +290,22 @@ Cargo diagnostics:
 @dataclass(frozen=True)
 class Prompts:
     code_writer_system: str = CODE_WRITER_SYSTEM_PROMPT
-    cargo_output_system: str = CARGO_OUTPUT_CONVERTER_SYSTEM_PROMPT
-    coder_system: str = CODER_SYSTEM_PROMPT
-    coder_prompt_template: str = CODER_PROMPT
+    code_reviewer_system: str = CODE_REVIEWER_SYSTEM_PROMPT
+    review_applicator_system: str = REVIEW_APPLICATOR_SYSTEM_PROMPT
+    review_applicator_prompt_template: str = REVIEW_APPLICATOR_PROMPT
     review_template: str = REVIEW_PROMPT_TEMPLATE
     cargo_comment_template: str = CARGO_COMMENT_PROMPT_TEMPLATE
 
     def build_review_question(self, code: str) -> str:
         return self.review_template.format(code=code)
 
-    def build_cargo_comment_prompt(self, code: str, cargo_outputs: list[str]) -> str:
-        diagnostics_text = "\n".join(f"- {diagnostic}" for diagnostic in cargo_outputs)
+    def build_code_reviewer_prompt(self, code: str, cargo_outputs: list[str]) -> str:
+        diagnostics_text = "\n".join(f"- {diagnostic}" for diagnostic in cargo_outputs) if cargo_outputs else "- (none)"
         return self.cargo_comment_template.format(code=code, diagnostics=diagnostics_text)
 
-    def build_coder_prompt(self, original_code: str, comments: list[str]) -> str:
+    def build_review_applicator_prompt(self, original_code: str, comments: list[str]) -> str:
         comments_text = "\n".join(f"- {comment}" for comment in comments)
-        return self.coder_prompt_template.format(code=original_code, comments=comments_text)
+        return self.review_applicator_prompt_template.format(code=original_code, comments=comments_text)
 
 
 @dataclass
@@ -136,6 +314,7 @@ class WorkItem:
     kind: Literal["dataset", "reprocess"] = "dataset"
     retry_count: int = 0
     code: Optional[str] = None
+    tests: Optional[str] = None
 
     def is_reprocess(self) -> bool:
         return self.kind == "reprocess"
@@ -160,25 +339,98 @@ class ExampleQueue:
         return len(self._queue)
 
 
+class TimingCollector:
+    def __init__(self) -> None:
+        self._totals: Dict[str, float] = {}
+        self._counts: Dict[str, int] = {}
+        self._stack: list[tuple[str, float]] = []
+        self._completed_iterations: int = 0
+
+    @dataclass
+    class _Stage:
+        collector: "TimingCollector"
+        name: str
+
+        def __enter__(self) -> None:
+            self.collector._start(self.name)
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            self.collector._stop(self.name)
+
+    def stage(self, name: str) -> "TimingCollector._Stage":
+        return self._Stage(self, name)
+
+    def _start(self, name: str) -> None:
+        self._stack.append((name, time.perf_counter()))
+
+    def _stop(self, name: str) -> None:
+        if not self._stack:
+            return
+        stack_name, start = self._stack.pop()
+        if stack_name != name:
+            return
+        elapsed = time.perf_counter() - start
+        self._totals[name] = self._totals.get(name, 0.0) + elapsed
+        self._counts[name] = self._counts.get(name, 0) + 1
+
+    def snapshot(self) -> dict[str, dict[str, float]]:
+        report: dict[str, dict[str, float]] = {}
+        for key, total in sorted(self._totals.items()):
+            count = self._counts.get(key, 0)
+            avg = total / count if count else 0.0
+            report[key] = {
+                "total": total,
+                "count": float(count),
+                "avg": avg,
+            }
+        return report
+
+    def log_summary(self, header: str = "Timing summary") -> None:
+        if not self._totals:
+            return
+        logger.info(header)
+        for key, metrics in self.snapshot().items():
+            logger.info(
+                "  %s: total=%.2fs count=%d avg=%.3fs",
+                key,
+                metrics["total"],
+                int(metrics["count"]),
+                metrics["avg"],
+            )
+
+    def mark_iteration_complete(self) -> None:
+        self._completed_iterations += 1
+
+    @property
+    def completed_iterations(self) -> int:
+        return self._completed_iterations
+
+
 class ExampleProcessor:
     def __init__(self, context: PipelineContext, prompts: Prompts) -> None:
         self.context = context
         self.prompts = prompts
         self._parser = custom_parser.CustomParser()
+        self._iteration_counter = 0
 
-    def process(self, item: WorkItem) -> tuple[Optional[ExampleRecord], Optional[WorkItem]]:
+    async def process(self, item: WorkItem) -> tuple[Optional[ExampleRecord], Optional[WorkItem]]:
+        preserved_tests = item.tests or "" if item.is_reprocess() else ""
         if item.is_reprocess():
             rust_code_full = item.code
+            tests = preserved_tests
             if rust_code_full is None:
                 logger.warning("Reprocess item missing code payload, skipping")
                 return None, None
         else:
-            response = get_response(
-                self.context,
-                self.prompts.code_writer_system,
-                item.prompt,
-                model=self.context.config.code_writer_model,
-            )
+            with self._time("llm_code_writer"):
+                response = await get_response(
+                    self.context,
+                    self.prompts.code_writer_system,
+                    item.prompt,
+                    model=self.context.config.code_writer_model,
+                    temperature=self.context.config.code_writer_temperature,
+                    max_tokens=self.context.config.code_writer_max_tokens,
+                )
             if response is None:
                 return None, None
 
@@ -186,7 +438,13 @@ class ExampleProcessor:
             if rust_code_full is None:
                 return None, None
 
-        rust_code_without_tests, tests = separate_tests_from_code(rust_code_full)
+        rust_code_without_tests, parsed_tests = separate_tests_from_code(rust_code_full)
+        if parsed_tests:
+            tests = parsed_tests
+        elif item.is_reprocess():
+            tests = preserved_tests
+        else:
+            tests = parsed_tests
 
         if tests:
             test_validation_code = f"""
@@ -194,28 +452,30 @@ fn dummy_main() {{}}
 
 {tests}
 """
-            test_cargo_outputs = get_cargo_outputs(self.context, test_validation_code)
+            with self._time("test_validation"):
+                test_cargo_outputs = get_cargo_outputs(self.context, test_validation_code)
             if test_cargo_outputs is None:
                 logger.warning("Skipping example due to cargo failure during test validation")
                 return None, None
-            if test_cargo_outputs:
+            if test_cargo_outputs and test_cargo_outputs.messages:
                 logger.warning(
                     "Skipping example due to test compilation errors: %s",
                     test_cargo_outputs.messages[:1],
                 )
                 return None, None
 
-        diagnostics = get_cargo_outputs(self.context, rust_code_full)
+        with self._time("cargo_diagnostics"):
+            diagnostics = get_cargo_outputs(self.context, rust_code_full)
         if diagnostics is None:
             return None, None
         cargo_outputs = diagnostics.messages
 
-        gold_comments = self._generate_gold_comments(rust_code_without_tests, cargo_outputs)
+        gold_comments = await self._generate_gold_comments(rust_code_without_tests, cargo_outputs)
         if not gold_comments and cargo_outputs:
             return None, None
 
         if gold_comments:
-            gold_code, reprocess_code = self._generate_gold_code(rust_code_without_tests, gold_comments)
+            gold_code, reprocess_code = await self._generate_gold_code(rust_code_without_tests, tests, gold_comments)
             if reprocess_code:
                 retry_count = item.retry_count + 1
                 if retry_count >= self.context.config.reprocess_retry_limit:
@@ -226,6 +486,7 @@ fn dummy_main() {{}}
                     kind="reprocess",
                     retry_count=retry_count,
                     code=reprocess_code,
+                    tests=tests,
                 )
                 return None, reprocess_item
             if not gold_code:
@@ -241,39 +502,59 @@ fn dummy_main() {{}}
             gold_code=gold_code,
             tests=tests,
         )
+
+        if self.context.timer:
+            self.context.timer.mark_iteration_complete()
+
+        self._iteration_counter += 1
+        self._maybe_log_iteration_timing()
+
         return ExampleRecord(question=review_prompt, info=info), None
 
-    def _generate_gold_comments(self, code: str, cargo_outputs: list[str]) -> list[str]:
-        if not cargo_outputs:
-            return []
-
-        prompt = self.prompts.build_cargo_comment_prompt(code, cargo_outputs)
-        response = get_response(
-            self.context,
-            self.prompts.cargo_output_system,
-            prompt,
-        )
+    async def _generate_gold_comments(self, code: str, cargo_outputs: list[str]) -> list[str]:
+        prompt = self.prompts.build_code_reviewer_prompt(code, cargo_outputs)
+        with self._time("llm_code_reviewer"):
+            response = await get_response(
+                self.context,
+                self.prompts.code_reviewer_system,
+                prompt,
+                model=self.context.config.code_reviewer_model,
+                temperature=self.context.config.code_reviewer_temperature,
+                max_tokens=self.context.config.code_reviewer_max_tokens,
+            )
 
         if not response:
             return []
 
-        return self._parser.parse_answer(response)
+        comments = self._parser.parse_answer(response)
 
-    def _generate_gold_code(
+        if not comments:
+            logger.debug(
+                "Reviewer response produced no comments. Raw response: %s",
+                response.strip(),
+            )
+
+        return comments
+
+    async def _generate_gold_code(
         self,
         original_code: str,
+        tests: str,
         gold_comments: list[str],
     ) -> tuple[Optional[str], Optional[str]]:
         if not gold_comments:
             return None, None
 
-        prompt = self.prompts.build_coder_prompt(original_code, gold_comments)
-        response = get_response(
-            self.context,
-            self.prompts.coder_system,
-            prompt,
-            model=self.context.config.code_fixer_model,
-        )
+        prompt = self.prompts.build_review_applicator_prompt(original_code, gold_comments)
+        with self._time("llm_review_applicator"):
+            response = await get_response(
+                self.context,
+                self.prompts.review_applicator_system,
+                prompt,
+                model=self.context.config.review_applicator_model,
+                temperature=self.context.config.review_applicator_temperature,
+                max_tokens=self.context.config.review_applicator_max_tokens,
+            )
 
         if not response:
             return None, None
@@ -283,152 +564,54 @@ fn dummy_main() {{}}
         if not refined_code:
             return None, None
 
-        logger.info("Validating gold code compiles")
-        try:
-            project_dir = setup_project(self.context, refined_code)
-            try:
-                result = subprocess.run(
-                    ["cargo", "build", "--quiet"],
-                    cwd=project_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.context.config.cargo_timeout,
-                )
-                compiles = result.returncode == 0
+        combined_code = combine_code_with_tests(refined_code, tests)
+        logger.info("Validating gold code with cargo (build/clippy/tests)")
+        with self._time("cargo_gold_validate"):
+            diagnostics = get_cargo_outputs(self.context, combined_code)
 
-                if not compiles:
-                    logger.warning("Gold code failed to compile, requeueing for reprocessing")
-                    return None, refined_code
-                return refined_code, None
+        if diagnostics is None:
+            logger.warning("Gold code validation failed (cargo error), requeueing for reprocessing")
+            return None, refined_code
 
-            finally:
-                shutil.rmtree(project_dir)
+        failing_tests = [msg for msg in diagnostics.messages if msg.startswith("[test_failure]")]
+        if failing_tests:
+            logger.warning("Gold code failed cargo tests, requeueing: %s", failing_tests[:1])
+            return None, refined_code
 
-        except Exception as exc:
-            logger.error("Error validating gold code: %s", exc)
-            return None, None
+        compile_errors = [msg for msg in diagnostics.messages if msg.startswith("[E")]
+        if compile_errors:
+            logger.warning("Gold code produced compiler errors, requeueing: %s", compile_errors[:1])
+            return None, refined_code
 
+        return refined_code, None
 
-logger = logging.getLogger(__name__)
+    def _time(self, name: str):
+        if self.context.timer is None:
+            return nullcontext()
+        return self.context.timer.stage(name)
 
-
-CODE_WRITER_SYSTEM_PROMPT = """
-You are a junior Rust developer who makes common programming mistakes. Given the following question, write a Rust function that attempts to complete the task but contains bugs. Do NOT write perfect code - you must introduce realistic bugs that cargo tools would catch.
-
-Then write unit tests for the function you defined. Write multiple unit tests for the function. The tests should be a simple line delimited list of assert! or assert_eq! statements. When writing the unit tests you can have comments specifying what you are testing in plain english. The tests should use super::*.
-
-An example output should look like the following:
-
-```rust
-/// Reasoning goes here
-/// and can be multi-line
-fn add_nums(x: i32, y: i32) -> i32 {
-    x + y
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add_nums() {
-        // Test adding positive numbers
-        assert_eq!(add_nums(4, 2), 6);
-        // Test adding a positive and negative number
-        assert_eq!(add_nums(4, -2), 2);
-        // Test adding two negative numbers
-        assert_eq!(add_nums(-12, -1), -13);
-    }
-}
-```
-
-CRITICAL: You MUST introduce bugs into your code. Do NOT write perfect code. Your code should always contain bugs and logical issues that cargo clippy, cargo build, or cargo test would catch.
-
-Examples of bugs to include:
-- Wrong operators (+ instead of -, < instead of <=)
-- Off-by-one errors in loops or indexing
-- Incorrect method calls (using wrong methods on types)
-- Logic errors in conditions
-- Performance issues (unnecessary cloning, inefficient algorithms)
-
-The tests should be correct and would pass if the function were implemented properly.
-
-Make sure to only respond with a single  ```rust``` block. The unit tests must be defined inside the mod tests {} module. Make sure to import any standard library modules that you need. Do not add a main function.
-"""
-
-CARGO_OUTPUT_CONVERTER_SYSTEM_PROMPT = """
-You are a helpful code reviewer. Given some code and a list of cargo diagnostic outputs (from cargo test/clippy/build), convert them into clear, actionable code review comments.
-
-RULES:
-1. Generate exactly one review comment for each unique cargo diagnostic (skip true duplicates)
-2. If you spot obvious logic bugs, incorrect algorithms, or significant maintainability issues that cargo cannot detect, you MAY add additional comments - but be selective and avoid nitpicking
-3. Focus on issues that would genuinely help the developer - avoid minor style preferences or overly pedantic suggestions
-4. If there are no cargo outputs and no obvious issues, it's perfectly fine to leave the review empty
-
-For each diagnostic, provide:
-- A clear explanation of the issue
-- Why it matters (performance, safety, readability, etc.)  
-- A specific suggestion for how to fix it
-- If relevant, a brief code example of the fix
-
-Format your response as follows:
-{format_str}
-
-Example input:
-```rust
-fn sum_vec(v: Vec<i32>) -> i32 {
-    v.iter().collect::<Vec<_>>().iter().sum()
-}
-```
-
-Cargo diagnostics:
-- [clippy::needless_collect] warning src/main.rs:2:5 avoid collecting into a vector unnecessarily
-- [dead_code] warning src/main.rs:1:4 function `sum_vec` is never used
-
-Example output:
-<think>
-Two diagnostics to address:
-1. Clippy warning about unnecessary collection - this is a performance issue
-2. Dead code warning - this is about code cleanliness
-</think>
-
-<review>
-<comment>**Unnecessary collection (line 2)**: You're collecting into a vector when you could iterate directly. This creates unnecessary memory allocation and hurts performance. Consider chaining iterators instead of `.collect().iter()` - change `v.iter().collect::<Vec<_>>().iter().sum()` to `v.iter().sum()`.</comment>
-<comment>**Unused function (line 1)**: The function `sum_vec` is defined but never called. Consider removing it if it's not needed, or add `#[allow(dead_code)]` if it's intentionally unused for now.</comment>
-</review>
-"""
-
-CODER_SYSTEM_PROMPT = """
-You are a code editor that applies ONLY the specific changes mentioned in review comments. You must:
-
-CRITICAL RULES:
-1. Apply ONLY the exact changes specified in the review comments
-2. Do NOT make any additional improvements, optimizations, or fixes beyond what's explicitly mentioned
-3. Do NOT add new functionality, change variable names, or restructure code unless specifically requested
-4. Do NOT fix other issues you might notice - only address the exact feedback given
-5. If a comment is unclear or impossible to implement, leave that part of the code unchanged
-
-Your job is to be a precise code editor, not a code improver. Apply the minimum changes necessary to address the specific feedback.
-
-Return ONLY the modified Rust code in a single ```rust code block. Do not include explanations.
-"""
-
-CODER_PROMPT = """
-Original Code:
-```rust
-{code}
-```
-
-Review Comments (apply ONLY these specific changes):
-{comments}
-
-IMPORTANT: Apply only the exact changes mentioned in the review comments above. Do not make any other modifications to the code. Return the minimally modified code in a ```rust block.
-"""
+    def _maybe_log_iteration_timing(self) -> None:
+        timer = self.context.timer
+        config = self.context.config
+        if not timer:
+            return
+        if config.timing_log_every <= 0:
+            return
+        if self.context.timer.completed_iterations % config.timing_log_every != 0:
+            return
+        timer.log_summary(f"Timing summary after {self.context.timer.completed_iterations} completed iterations")
 
 
 def build_context(config: Config) -> PipelineContext:
-    client = OpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url=config.base_url)
-    return PipelineContext(config=config, client=client)
+    client = AsyncOpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url=config.base_url)
+    timer = TimingCollector() if config.enable_timing else None
+    api_semaphore = asyncio.Semaphore(config.max_concurrent_api_calls)
+    return PipelineContext(
+        config=config,
+        client=client,
+        timer=timer,
+        api_semaphore=api_semaphore,
+    )
 
 
 def extract_rust_code(response) -> Optional[str]:
@@ -633,22 +816,33 @@ def get_cargo_outputs(context: PipelineContext, code: str) -> Optional[CargoDiag
     return CargoDiagnostics(messages=diagnostics)
 
 
-def get_response(
+async def get_response(
     context: PipelineContext,
     system_prompt: str,
     prompt: str,
-    model: Optional[str] = None,
+    model: str,
+    temperature: float,
+    max_tokens: int,
 ) -> Optional[str]:
-    target_model = model or context.config.review_comment_model
+    target_model = model
     for attempt in range(context.config.llm_retry_attempts):
         try:
-            response = context.client.chat.completions.create(
-                model=target_model,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                temperature=0.0 if target_model == context.config.code_fixer_model else 0.1,
-                max_tokens=4000,
-            )
-            time.sleep(0.5)
+            if context.api_semaphore is None:
+                response = await context.client.chat.completions.create(
+                    model=target_model,
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            else:
+                async with context.api_semaphore:
+                    response = await context.client.chat.completions.create(
+                        model=target_model,
+                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+            await asyncio.sleep(0.5)
             return response.choices[0].message.content
         except Exception as e:
             if attempt == context.config.llm_retry_attempts - 1:
@@ -661,15 +855,40 @@ def get_response(
                 context.config.llm_retry_attempts,
                 wait_time,
             )
-            time.sleep(wait_time)
+            await asyncio.sleep(wait_time)
     return None
 
 
-def main() -> None:
+async def main() -> None:
+    import argparse
     import random
 
+    parser = argparse.ArgumentParser(description="Generate Rust code review dataset")
+    parser.add_argument(
+        "--code_reviewer_model", type=str, help="Override the code reviewer model (default: x-ai/grok-4)"
+    )
+    parser.add_argument(
+        "--target_dataset_hub", type=str, help="Override the target dataset hub (default: ljt019/rust-review-hq)"
+    )
+    args = parser.parse_args()
+
     config = Config()
+
+    # Apply command line overrides
+    if args.code_reviewer_model:
+        config.code_reviewer_model = args.code_reviewer_model
+    if args.target_dataset_hub:
+        config.target_dataset_hub = args.target_dataset_hub
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    logger.info("=== Data Generation Configuration ===")
+    logger.info("Code reviewer model: %s", config.code_reviewer_model)
+    logger.info("Target dataset hub: %s", config.target_dataset_hub)
+    logger.info("Max concurrent API calls: %s", config.max_concurrent_api_calls)
+    logger.info("Target examples: %s", config.num_examples)
+    logger.info("=====================================")
+
     context = build_context(config)
 
     logger.info("Loading dataset %s", config.dataset_id)
@@ -686,35 +905,128 @@ def main() -> None:
     pipeline = ExampleProcessor(context, Prompts())
     initial_questions = [dataset[i]["question"] for i in selected_indices]
 
-    logger.info("Processing %s examples", len(initial_questions))
+    results: list[ExampleRecord] = []
+
+    try:
+        existing_dataset_candidate = load_dataset(
+            config.target_dataset_hub,
+            split="train",
+            streaming=False,
+        )
+        if not isinstance(existing_dataset_candidate, Dataset):
+            logger.warning(
+                "Expected a Dataset from %s but got %s; skipping preload",
+                config.target_dataset_hub,
+                type(existing_dataset_candidate).__name__,
+            )
+        elif isinstance(existing_dataset_candidate, Dataset):
+            logger.info(
+                "Loaded %s existing examples from %s",
+                len(existing_dataset_candidate),
+                config.target_dataset_hub,
+            )
+            initial_existing_records: list[ExampleRecord] = []
+            for entry in existing_dataset_candidate:
+                if not isinstance(entry, dict):
+                    logger.warning(
+                        "Unexpected entry type %s in existing dataset; skipping",
+                        type(entry).__name__,
+                    )
+                    continue
+
+                entry_info: Any = entry.get("info", {})
+                if isinstance(entry_info, str):
+                    try:
+                        entry_info = json.loads(entry_info)
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to decode info field for existing example; skipping")
+                        continue
+
+                if not isinstance(entry_info, dict):
+                    logger.warning("Unexpected info field type (%s); skipping", type(entry_info).__name__)
+                    continue
+
+            info = ExampleInfo(
+                cargo_outputs=entry_info.get("cargo_outputs", []),
+                gold_comments=entry_info.get("gold_comments", []),
+                gold_code=entry_info.get("gold_code", ""),
+                tests=entry_info.get("tests", ""),
+            )
+
+            initial_existing_records.append(
+                ExampleRecord(
+                    question=entry.get("question", ""),
+                    info=info,
+                )
+            )
+            results.extend(initial_existing_records)
+    except DatasetNotFoundError:
+        logger.info(
+            "No existing dataset found at %s; starting from empty base",
+            config.target_dataset_hub,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to load existing dataset from %s: %s",
+            config.target_dataset_hub,
+            exc,
+        )
+
+    logger.info(
+        "Processing %s new prompts (starting with %s existing examples)",
+        len(initial_questions),
+        len(results),
+    )
 
     work_queue = ExampleQueue([WorkItem(prompt=question) for question in initial_questions])
-    results: list[ExampleRecord] = []
+
+    # Process items concurrently
+    semaphore = asyncio.Semaphore(config.max_concurrent_api_calls)
+
+    async def process_single_item(item: WorkItem) -> tuple[Optional[ExampleRecord], Optional[WorkItem]]:
+        async with semaphore:
+            with context.timer.stage("iteration") if context.timer else nullcontext():
+                return await pipeline.process(item)
 
     with tqdm(total=len(initial_questions), desc="Processing examples") as pbar:
         processed_originals = 0
+        pending_tasks = set()
 
-        while work_queue and len(results) < num_examples:
-            item = work_queue.pop()
-            if item is None:
+        while work_queue or pending_tasks:
+            # Submit new tasks up to the concurrency limit
+            while len(pending_tasks) < config.max_concurrent_api_calls and work_queue and len(results) < num_examples:
+                item = work_queue.pop()
+                if item is None:
+                    break
+
+                task = asyncio.create_task(process_single_item(item))
+                setattr(task, "item", item)  # Store original item for tracking
+                pending_tasks.add(task)
+
+            if not pending_tasks:
                 break
 
-            if item.kind == "dataset":
-                processed_originals += 1
-                pbar.update(1)
+            # Wait for at least one task to complete
+            done, pending_tasks = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
 
-            result, reprocess_item = pipeline.process(item)
+            for task in done:
+                item = getattr(task, "item")
+                result, reprocess_item = await task
 
-            if result is not None:
-                results.append(result)
+                if item.kind == "dataset":
+                    processed_originals += 1
+                    pbar.update(1)
 
-                if len(results) % config.checkpoint_every == 0:
-                    logger.info("Uploading checkpoint at %s examples", len(results))
-                    checkpoint_dataset = Dataset.from_list([r.to_dict() for r in results])
-                    checkpoint_dataset.push_to_hub(config.target_dataset_hub)
-                    logger.info("Checkpoint uploaded successfully")
-            elif reprocess_item is not None:
-                work_queue.push(reprocess_item)
+                if result is not None:
+                    results.append(result)
+
+                    if len(results) % config.checkpoint_every == 0:
+                        logger.info("Uploading checkpoint at %s examples", len(results))
+                        checkpoint_dataset = Dataset.from_list([r.to_dict() for r in results])
+                        checkpoint_dataset.push_to_hub(config.target_dataset_hub)
+                        logger.info("Checkpoint upload complete")
+                elif reprocess_item is not None:
+                    work_queue.push(reprocess_item)
 
     if not results:
         logger.error("No valid examples generated")
@@ -754,11 +1066,25 @@ def main() -> None:
         logger.info("Already have %s clean examples (target: %s), ratio is correct", existing_clean, target_clean)
 
     final_clean_count = sum(1 for result in results if not result.info.gold_comments)
-    logger.info("Generated %s examples (%s clean), uploading to hub", len(results), final_clean_count)
+    logger.info(
+        "Generated %s examples (%s clean), merging with existing dataset",
+        len(results),
+        final_clean_count,
+    )
+
     final_dataset = Dataset.from_list([record.to_dict() for record in results])
+
+    logger.info(
+        "Uploading dataset with %s total examples to %s",
+        len(final_dataset),
+        config.target_dataset_hub,
+    )
     final_dataset.push_to_hub(config.target_dataset_hub)
     logger.info("Upload complete")
 
+    if context.timer:
+        context.timer.log_summary("Overall timing summary")
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
