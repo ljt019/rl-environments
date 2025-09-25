@@ -28,7 +28,7 @@ def load_environment(
     coder_model: str,
     coder_base_url: str = "https://openrouter.ai/api/v1",
     coder_api_key: str | None = None,
-    dataset_name: str = "ljt019/rust-review-coral",
+    dataset_name: str = "ljt019/rust-review-singleturn-3250",
 ) -> vf.SingleTurnEnv:
     """
     Load the rust code review environment.
@@ -274,6 +274,7 @@ def load_environment(
     vf_env = vf.SingleTurnEnv(
         system_prompt=SYSTEM_PROMPT.format(format_str=parser.get_format_str()),
         dataset=dataset["train"],
+        eval_dataset=dataset["test"],
         parser=parser,
         rubric=rubric,
     )
