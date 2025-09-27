@@ -8,7 +8,7 @@ from environments.rust_review.rust_review import load_environment
 MODEL_NAME = "Qwen/Qwen2.5-Coder-3B-Instruct"
 REVIEW_APPLICATOR_MODEL = "openai/gpt-4.1-nano"
 
-RUN_NAME = "rust-review-grpo-250925"
+RUN_NAME = "rust-review-grpo-270925"
 
 #############################################
 
