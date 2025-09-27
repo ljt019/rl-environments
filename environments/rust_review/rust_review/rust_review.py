@@ -31,6 +31,7 @@ def load_environment(
     review_applicator_base_url: str = "https://openrouter.ai/api/v1",
     review_applicator_api_key: str | None = None,
     dataset_name: str = "ljt019/rust-review-singleturn-3250",
+    semantic_similarity_max_concurrent: int | None = None,
 ) -> vf.SingleTurnEnv:
     """
     Load the rust code review environment.
@@ -64,6 +65,19 @@ def load_environment(
 
     dataset = load_dataset(dataset_name)
 
+    env_sem_limit = os.getenv("RUST_REVIEW_SEMANTIC_SIM_MAX_CONCURRENT")
+    if semantic_similarity_max_concurrent is not None:
+        sem_limit = semantic_similarity_max_concurrent
+    elif env_sem_limit is not None:
+        try:
+            sem_limit = int(env_sem_limit)
+        except ValueError:
+            sem_limit = 32
+    else:
+        sem_limit = 32
+    if sem_limit < 1:
+        sem_limit = 0
+
     parser = CustomParser()
 
     def minimum_issues_found_reward(completion, **kwargs):
@@ -88,6 +102,7 @@ def load_environment(
 
     _st_lock = threading.Lock()
     _st_model = {"model": None}
+    _encode_semaphore_holder = {"sem": None}
 
     def _get_st_model():
         from sentence_transformers import SentenceTransformer
@@ -102,15 +117,28 @@ def load_environment(
         import numpy as np
 
         model = _get_st_model()
-        try:
-            emb = await asyncio.to_thread(
-                model.encode,
+        semaphore = None
+        if sem_limit:
+            if _encode_semaphore_holder["sem"] is None:
+                _encode_semaphore_holder["sem"] = asyncio.Semaphore(sem_limit)
+            semaphore = _encode_semaphore_holder["sem"]
+
+        async def _run_encode(current_model):
+            return await asyncio.to_thread(
+                current_model.encode,
                 texts,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
                 batch_size=32,
                 show_progress_bar=False,
             )
+
+        try:
+            if semaphore is not None:
+                async with semaphore:
+                    emb = await _run_encode(model)
+            else:
+                emb = await _run_encode(model)
             return np.atleast_2d(emb)
         except Exception as exc:
             print(f"[RUST_REVIEW] _safe_encode: encode failed with {exc}, retrying on CPU")
@@ -120,14 +148,11 @@ def load_environment(
                 _st_model["model"] = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
                 model = _st_model["model"]
             try:
-                emb = await asyncio.to_thread(
-                    model.encode,
-                    texts,
-                    normalize_embeddings=True,
-                    convert_to_numpy=True,
-                    batch_size=32,
-                    show_progress_bar=False,
-                )
+                if semaphore is not None:
+                    async with semaphore:
+                        emb = await _run_encode(model)
+                else:
+                    emb = await _run_encode(model)
                 return np.atleast_2d(emb)
             except Exception as exc_retry:
                 print(f"[RUST_REVIEW] _safe_encode: retry failed with {exc_retry}")
