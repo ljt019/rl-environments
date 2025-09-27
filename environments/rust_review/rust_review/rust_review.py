@@ -72,9 +72,9 @@ def load_environment(
         try:
             sem_limit = int(env_sem_limit)
         except ValueError:
-            sem_limit = 32
+            sem_limit = 4
     else:
-        sem_limit = 32
+        sem_limit = 4
     if sem_limit < 1:
         sem_limit = 0
 
