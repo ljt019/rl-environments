@@ -2,7 +2,7 @@
 
 ############## vLLM Config ##############
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-7B-Instruct"
 CUDA_VISIBLE_DEVICES="0,1"
 
 ##############################################
