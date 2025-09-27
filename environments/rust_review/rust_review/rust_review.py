@@ -299,11 +299,10 @@ def load_environment(
             cargo_build_reward,
             cargo_test_reward,
             cargo_clippy_reward,
-            semantic_similarity_reward,
             minimum_issues_found_reward,
             parser.get_format_reward_func(),
         ],
-        weights=[0.35, 0.15, 0.15, 0.05, 0.20, 0.07, 0.03],
+        weights=[0.35, 0.15, 0.15, 0.05, 0.07, 0.03],
         parser=parser,
     )
 
