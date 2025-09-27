@@ -17,6 +17,9 @@ env = load_environment(review_applicator_model=REVIEW_APPLICATOR_MODEL)
 model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 
 args = vf.grpo_defaults(run_name=RUN_NAME)
+args.max_steps = 2400
+args.save_steps = 200
+args.logging_steps = 10
 
 trainer = vf.GRPOTrainer(
     model=model,

@@ -23,7 +23,7 @@ main() {
     uv add 'verifiers[all]' && uv pip install flash-attn --no-build-isolation
 
     log_info "Installing prime-cli..."
-    uv add prime-cli
+    uv add prime
 
     log_info "Installing dependencies in virtual environment..."
     uv sync
