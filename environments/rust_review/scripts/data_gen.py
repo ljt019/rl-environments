@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+"""
+Rust Code Review Dataset Generation Pipeline
+
+Generates training data by:
+  1. Creating buggy Rust code via LLM
+  2. Running cargo diagnostics (build/clippy/test)
+  3. Generating review comments from diagnostics
+  4. Creating "gold" fixed code via review applicator
+  5. Packaging everything into HuggingFace dataset
+
+Architecture:
+  • Async pipeline with configurable concurrency
+  • Retry logic for LLM failures and cargo timeouts
+  • Checkpoint saves every N examples
+  • Clean/buggy example ratio balancing
+"""
+
 import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -12,6 +30,7 @@ import uuid
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, Literal, Optional
 
 from datasets import Dataset, load_dataset
@@ -21,6 +40,11 @@ from rust_review import custom_parser
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# PROMPTS & CONSTANTS
+# =============================================================================
 
 
 CODE_WRITER_SYSTEM_PROMPT = """
@@ -199,32 +223,55 @@ IMPORTANT: Apply only the exact changes mentioned in the review comments above. 
 """
 
 
+# =============================================================================
+# CONFIGURATION DATACLASSES
+# =============================================================================
+
+
 @dataclass
-class Config:
-    code_writer_model: str = "openai/gpt-4.1-nano"
-    code_reviewer_model: str = "x-ai/grok-4"
-    review_applicator_model: str = "openai/gpt-4.1-nano"
-    code_writer_temperature: float = 0.1
-    code_reviewer_temperature: float = 0.1
-    review_applicator_temperature: float = 0.0
-    code_writer_max_tokens: int = 4000
-    code_reviewer_max_tokens: int = 4000
-    review_applicator_max_tokens: int = 4000
+class LLMConfig:
     base_url: str = "https://openrouter.ai/api/v1"
-    num_examples: int = 10_000
-    no_comment_ratio: float = 0.1
-    dataset_id: str = "ljt019/rust-17000"
-    target_dataset_hub: str = "ljt019/rust-review-hq"
-    outputs_base_dir: str = field(default_factory=lambda: os.path.join("outputs", "tests"))
-    cargo_timeout: int = 180
-    cargo_test_timeout: int = 60
+    code_writer_model: str = "openai/gpt-4.1-nano"
+    code_writer_temperature: float = 0.1
+    code_writer_max_tokens: int = 4000
+    code_reviewer_model: str = "x-ai/grok-4"
+    code_reviewer_temperature: float = 0.1
+    code_reviewer_max_tokens: int = 4000
+    review_applicator_model: str = "openai/gpt-4.1-nano"
+    review_applicator_temperature: float = 0.0
+    review_applicator_max_tokens: int = 4000
     llm_retry_attempts: int = 3
     llm_retry_backoff: int = 30
+    llm_retry_cooldown: float = 0.5
+
+
+@dataclass
+class DatasetConfig:
+    dataset_id: str = "ljt019/rust-17000"
+    target_dataset_hub: str = "ljt019/rust-review-hq"
+    num_examples: int = 10_000
+    no_comment_ratio: float = 0.1
+
+
+@dataclass
+class CargoConfig:
+    outputs_base_dir: Path = field(default_factory=lambda: Path("outputs") / "tests")
+    cargo_timeout: int = 180
+    cargo_test_timeout: int = 60
+
+
+@dataclass
+class RuntimeConfig:
     reprocess_retry_limit: int = 6
     checkpoint_every: int = 50
     enable_timing: bool = True
     timing_log_every: int = 1
     max_concurrent_api_calls: int = 10
+
+
+# =============================================================================
+# DATA STRUCTURES & UTILITIES
+# =============================================================================
 
 
 @dataclass
@@ -262,10 +309,11 @@ class CargoDiagnostics:
 
 @dataclass
 class PipelineContext:
-    config: Config
+    llm_config: LLMConfig
+    cargo_config: CargoConfig
+    runtime_config: RuntimeConfig
     client: AsyncOpenAI
     timer: Optional["TimingCollector"] = None
-    api_semaphore: Optional[asyncio.Semaphore] = None
 
 
 REVIEW_PROMPT_TEMPLATE = """Please review the following code and provide feedback on any issues you find.
@@ -406,6 +454,11 @@ class TimingCollector:
         return self._completed_iterations
 
 
+# =============================================================================
+# PIPELINE IMPLEMENTATION
+# =============================================================================
+
+
 class ExampleProcessor:
     def __init__(self, context: PipelineContext, prompts: Prompts) -> None:
         self.context = context
@@ -427,9 +480,9 @@ class ExampleProcessor:
                     self.context,
                     self.prompts.code_writer_system,
                     item.prompt,
-                    model=self.context.config.code_writer_model,
-                    temperature=self.context.config.code_writer_temperature,
-                    max_tokens=self.context.config.code_writer_max_tokens,
+                    model=self.context.llm_config.code_writer_model,
+                    temperature=self.context.llm_config.code_writer_temperature,
+                    max_tokens=self.context.llm_config.code_writer_max_tokens,
                 )
             if response is None:
                 return None, None
@@ -446,23 +499,8 @@ class ExampleProcessor:
         else:
             tests = parsed_tests
 
-        if tests:
-            test_validation_code = f"""
-fn dummy_main() {{}}
-
-{tests}
-"""
-            with self._time("test_validation"):
-                test_cargo_outputs = get_cargo_outputs(self.context, test_validation_code)
-            if test_cargo_outputs is None:
-                logger.warning("Skipping example due to cargo failure during test validation")
-                return None, None
-            if test_cargo_outputs and test_cargo_outputs.messages:
-                logger.warning(
-                    "Skipping example due to test compilation errors: %s",
-                    test_cargo_outputs.messages[:1],
-                )
-                return None, None
+        if tests and not self._validate_tests(tests):
+            return None, None
 
         with self._time("cargo_diagnostics"):
             diagnostics = get_cargo_outputs(self.context, rust_code_full)
@@ -478,7 +516,7 @@ fn dummy_main() {{}}
             gold_code, reprocess_code = await self._generate_gold_code(rust_code_without_tests, tests, gold_comments)
             if reprocess_code:
                 retry_count = item.retry_count + 1
-                if retry_count >= self.context.config.reprocess_retry_limit:
+                if retry_count >= self.context.runtime_config.reprocess_retry_limit:
                     logger.warning("Skipping example after %s failed attempts", retry_count)
                     return None, None
                 reprocess_item = WorkItem(
@@ -511,6 +549,28 @@ fn dummy_main() {{}}
 
         return ExampleRecord(question=review_prompt, info=info), None
 
+    def _validate_tests(self, tests: str) -> bool:
+        test_validation_code = f"""
+fn dummy_main() {{}}
+
+{tests}
+"""
+        with self._time("test_validation"):
+            test_cargo_outputs = get_cargo_outputs(self.context, test_validation_code)
+
+        if test_cargo_outputs is None:
+            logger.warning("Skipping example due to cargo failure during test validation")
+            return False
+
+        if test_cargo_outputs and test_cargo_outputs.messages:
+            logger.warning(
+                "Skipping example due to test compilation errors: %s",
+                test_cargo_outputs.messages[:1],
+            )
+            return False
+
+        return True
+
     async def _generate_gold_comments(self, code: str, cargo_outputs: list[str]) -> list[str]:
         prompt = self.prompts.build_code_reviewer_prompt(code, cargo_outputs)
         with self._time("llm_code_reviewer"):
@@ -518,9 +578,9 @@ fn dummy_main() {{}}
                 self.context,
                 self.prompts.code_reviewer_system,
                 prompt,
-                model=self.context.config.code_reviewer_model,
-                temperature=self.context.config.code_reviewer_temperature,
-                max_tokens=self.context.config.code_reviewer_max_tokens,
+                model=self.context.llm_config.code_reviewer_model,
+                temperature=self.context.llm_config.code_reviewer_temperature,
+                max_tokens=self.context.llm_config.code_reviewer_max_tokens,
             )
 
         if not response:
@@ -551,9 +611,9 @@ fn dummy_main() {{}}
                 self.context,
                 self.prompts.review_applicator_system,
                 prompt,
-                model=self.context.config.review_applicator_model,
-                temperature=self.context.config.review_applicator_temperature,
-                max_tokens=self.context.config.review_applicator_max_tokens,
+                model=self.context.llm_config.review_applicator_model,
+                temperature=self.context.llm_config.review_applicator_temperature,
+                max_tokens=self.context.llm_config.review_applicator_max_tokens,
             )
 
         if not response:
@@ -592,7 +652,7 @@ fn dummy_main() {{}}
 
     def _maybe_log_iteration_timing(self) -> None:
         timer = self.context.timer
-        config = self.context.config
+        config = self.context.runtime_config
         if not timer:
             return
         if config.timing_log_every <= 0:
@@ -602,15 +662,15 @@ fn dummy_main() {{}}
         timer.log_summary(f"Timing summary after {self.context.timer.completed_iterations} completed iterations")
 
 
-def build_context(config: Config) -> PipelineContext:
-    client = AsyncOpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url=config.base_url)
-    timer = TimingCollector() if config.enable_timing else None
-    api_semaphore = asyncio.Semaphore(config.max_concurrent_api_calls)
+def build_context(llm_config: LLMConfig, cargo_config: CargoConfig, runtime_config: RuntimeConfig) -> PipelineContext:
+    client = AsyncOpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url=llm_config.base_url)
+    timer = TimingCollector() if runtime_config.enable_timing else None
     return PipelineContext(
-        config=config,
+        llm_config=llm_config,
+        cargo_config=cargo_config,
+        runtime_config=runtime_config,
         client=client,
         timer=timer,
-        api_semaphore=api_semaphore,
     )
 
 
@@ -644,13 +704,13 @@ def combine_code_with_tests(code: str, tests: str) -> str:
     return f"{code}\n\n{tests}"
 
 
-def setup_project(context: PipelineContext, code: str) -> str:
-    base_dir = context.config.outputs_base_dir
-    os.makedirs(base_dir, exist_ok=True)
+def setup_project(context: PipelineContext, code: str) -> Path:
+    base_dir = context.cargo_config.outputs_base_dir
+    base_dir.mkdir(parents=True, exist_ok=True)
 
-    project_dir = os.path.join(base_dir, f"temp_rust_project_{uuid.uuid4()}")
-    src_dir = os.path.join(project_dir, "src")
-    os.makedirs(src_dir, exist_ok=True)
+    project_dir = base_dir / f"temp_rust_project_{uuid.uuid4()}"
+    src_dir = project_dir / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
 
     cargo_toml = """
     [package]
@@ -660,8 +720,7 @@ def setup_project(context: PipelineContext, code: str) -> str:
     
     [dependencies]
     """
-    with open(os.path.join(project_dir, "Cargo.toml"), "w", encoding="utf-8") as f:
-        f.write(cargo_toml)
+    (project_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
 
     main_rs = f"""
     #![allow(dead_code)]
@@ -671,8 +730,7 @@ def setup_project(context: PipelineContext, code: str) -> str:
         println!("Hello World");
     }}
     """
-    with open(os.path.join(src_dir, "main.rs"), "w", encoding="utf-8") as f:
-        f.write(main_rs)
+    (src_dir / "main.rs").write_text(main_rs, encoding="utf-8")
 
     return project_dir
 
@@ -724,31 +782,35 @@ def parse_cargo_json_messages(stdout: str) -> list[str]:
     return diagnostics
 
 
-def run_cargo_json(context: PipelineContext, project_dir: str, args: list[str], timeout: int) -> Optional[list[str]]:
-    result = subprocess.run(
-        args + ["--message-format", "json"],
-        cwd=project_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
+def run_cargo_json(context: PipelineContext, project_dir: Path, args: list[str], timeout: int) -> Optional[list[str]]:
+    try:
+        result = subprocess.run(
+            args + ["--message-format", "json"],
+            cwd=project_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Cargo command %s timed out after %ss", " ".join(args), timeout)
+        return None
     if result.stdout is None:
         return None
     return parse_cargo_json_messages(result.stdout)
 
 
-def run_cargo_build(context: PipelineContext, project_dir: str) -> Optional[list[str]]:
-    return run_cargo_json(context, project_dir, ["cargo", "build"], context.config.cargo_timeout)
+def run_cargo_build(context: PipelineContext, project_dir: Path) -> Optional[list[str]]:
+    return run_cargo_json(context, project_dir, ["cargo", "build"], context.cargo_config.cargo_timeout)
 
 
-def run_cargo_clippy(context: PipelineContext, project_dir: str) -> Optional[list[str]]:
-    return run_cargo_json(context, project_dir, ["cargo", "clippy"], context.config.cargo_timeout)
+def run_cargo_clippy(context: PipelineContext, project_dir: Path) -> Optional[list[str]]:
+    return run_cargo_json(context, project_dir, ["cargo", "clippy"], context.cargo_config.cargo_timeout)
 
 
-def run_cargo_tests(context: PipelineContext, project_dir: str) -> Optional[list[str]]:
+def run_cargo_tests(context: PipelineContext, project_dir: Path) -> Optional[list[str]]:
     try:
         result = subprocess.run(
             ["cargo", "test"],
@@ -758,7 +820,7 @@ def run_cargo_tests(context: PipelineContext, project_dir: str) -> Optional[list
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=context.config.cargo_test_timeout,
+            timeout=context.cargo_config.cargo_test_timeout,
         )
 
         diagnostics = []
@@ -807,10 +869,10 @@ def get_cargo_outputs(context: PipelineContext, code: str) -> Optional[CargoDiag
             shutil.rmtree(project_dir)
         except PermissionError:
             pass
-        tests_dir = context.config.outputs_base_dir
+        tests_dir = context.cargo_config.outputs_base_dir
         try:
-            if os.path.exists(tests_dir) and not os.listdir(tests_dir):
-                os.rmdir(tests_dir)
+            if tests_dir.exists() and not any(tests_dir.iterdir()):
+                tests_dir.rmdir()
         except OSError:
             pass
     return CargoDiagnostics(messages=diagnostics)
@@ -825,34 +887,25 @@ async def get_response(
     max_tokens: int,
 ) -> Optional[str]:
     target_model = model
-    for attempt in range(context.config.llm_retry_attempts):
+    for attempt in range(context.llm_config.llm_retry_attempts):
         try:
-            if context.api_semaphore is None:
-                response = await context.client.chat.completions.create(
-                    model=target_model,
-                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-            else:
-                async with context.api_semaphore:
-                    response = await context.client.chat.completions.create(
-                        model=target_model,
-                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-            await asyncio.sleep(0.5)
+            response = await context.client.chat.completions.create(
+                model=target_model,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            await asyncio.sleep(context.llm_config.llm_retry_cooldown)
             return response.choices[0].message.content
         except Exception as e:
-            if attempt == context.config.llm_retry_attempts - 1:
-                logger.error("API call failed after %s attempts: %s", context.config.llm_retry_attempts, e)
+            if attempt == context.llm_config.llm_retry_attempts - 1:
+                logger.error("API call failed after %s attempts: %s", context.llm_config.llm_retry_attempts, e)
                 return None
-            wait_time = context.config.llm_retry_backoff * (attempt + 1)
+            wait_time = context.llm_config.llm_retry_backoff * (attempt + 1)
             logger.warning(
                 "API call failed (attempt %s/%s), retrying in %ss...",
                 attempt + 1,
-                context.config.llm_retry_attempts,
+                context.llm_config.llm_retry_attempts,
                 wait_time,
             )
             await asyncio.sleep(wait_time)
@@ -860,8 +913,11 @@ async def get_response(
 
 
 async def main() -> None:
+    # =============================================================================
+    # COMMAND-LINE ENTRYPOINT
+    # =============================================================================
+
     import argparse
-    import random
 
     parser = argparse.ArgumentParser(description="Generate Rust code review dataset")
     parser.add_argument(
@@ -872,31 +928,33 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    config = Config()
+    llm_config = LLMConfig()
+    dataset_config = DatasetConfig()
+    cargo_config = CargoConfig()
+    runtime_config = RuntimeConfig()
 
-    # Apply command line overrides
     if args.code_reviewer_model:
-        config.code_reviewer_model = args.code_reviewer_model
+        llm_config.code_reviewer_model = args.code_reviewer_model
     if args.target_dataset_hub:
-        config.target_dataset_hub = args.target_dataset_hub
+        dataset_config.target_dataset_hub = args.target_dataset_hub
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     logger.info("=== Data Generation Configuration ===")
-    logger.info("Code reviewer model: %s", config.code_reviewer_model)
-    logger.info("Target dataset hub: %s", config.target_dataset_hub)
-    logger.info("Max concurrent API calls: %s", config.max_concurrent_api_calls)
-    logger.info("Target examples: %s", config.num_examples)
+    logger.info("Code reviewer model: %s", llm_config.code_reviewer_model)
+    logger.info("Target dataset hub: %s", dataset_config.target_dataset_hub)
+    logger.info("Max concurrent API calls: %s", runtime_config.max_concurrent_api_calls)
+    logger.info("Target examples: %s", dataset_config.num_examples)
     logger.info("=====================================")
 
-    context = build_context(config)
+    context = build_context(llm_config, cargo_config, runtime_config)
 
-    logger.info("Loading dataset %s", config.dataset_id)
-    dataset = load_dataset(config.dataset_id, split="train", streaming=False)
+    logger.info("Loading dataset %s", dataset_config.dataset_id)
+    dataset = load_dataset(dataset_config.dataset_id, split="train", streaming=False)
     assert isinstance(dataset, Dataset)
 
     total_available = len(dataset)
-    num_examples = min(config.num_examples, total_available)
+    num_examples = min(dataset_config.num_examples, total_available)
 
     all_indices = list(range(total_available))
     random.shuffle(all_indices)
@@ -909,21 +967,21 @@ async def main() -> None:
 
     try:
         existing_dataset_candidate = load_dataset(
-            config.target_dataset_hub,
+            dataset_config.target_dataset_hub,
             split="train",
             streaming=False,
         )
         if not isinstance(existing_dataset_candidate, Dataset):
             logger.warning(
                 "Expected a Dataset from %s but got %s; skipping preload",
-                config.target_dataset_hub,
+                dataset_config.target_dataset_hub,
                 type(existing_dataset_candidate).__name__,
             )
         elif isinstance(existing_dataset_candidate, Dataset):
             logger.info(
                 "Loaded %s existing examples from %s",
                 len(existing_dataset_candidate),
-                config.target_dataset_hub,
+                dataset_config.target_dataset_hub,
             )
             initial_existing_records: list[ExampleRecord] = []
             for entry in existing_dataset_candidate:
@@ -963,12 +1021,12 @@ async def main() -> None:
     except DatasetNotFoundError:
         logger.info(
             "No existing dataset found at %s; starting from empty base",
-            config.target_dataset_hub,
+            dataset_config.target_dataset_hub,
         )
     except Exception as exc:
         logger.warning(
             "Failed to load existing dataset from %s: %s",
-            config.target_dataset_hub,
+            dataset_config.target_dataset_hub,
             exc,
         )
 
@@ -980,8 +1038,7 @@ async def main() -> None:
 
     work_queue = ExampleQueue([WorkItem(prompt=question) for question in initial_questions])
 
-    # Process items concurrently
-    semaphore = asyncio.Semaphore(config.max_concurrent_api_calls)
+    semaphore = asyncio.Semaphore(runtime_config.max_concurrent_api_calls)
 
     async def process_single_item(item: WorkItem) -> tuple[Optional[ExampleRecord], Optional[WorkItem]]:
         async with semaphore:
@@ -993,20 +1050,22 @@ async def main() -> None:
         pending_tasks = set()
 
         while work_queue or pending_tasks:
-            # Submit new tasks up to the concurrency limit
-            while len(pending_tasks) < config.max_concurrent_api_calls and work_queue and len(results) < num_examples:
+            while (
+                len(pending_tasks) < runtime_config.max_concurrent_api_calls
+                and work_queue
+                and len(results) < num_examples
+            ):
                 item = work_queue.pop()
                 if item is None:
                     break
 
                 task = asyncio.create_task(process_single_item(item))
-                setattr(task, "item", item)  # Store original item for tracking
+                setattr(task, "item", item)
                 pending_tasks.add(task)
 
             if not pending_tasks:
                 break
 
-            # Wait for at least one task to complete
             done, pending_tasks = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
 
             for task in done:
@@ -1020,10 +1079,10 @@ async def main() -> None:
                 if result is not None:
                     results.append(result)
 
-                    if len(results) % config.checkpoint_every == 0:
+                    if len(results) % runtime_config.checkpoint_every == 0:
                         logger.info("Uploading checkpoint at %s examples", len(results))
                         checkpoint_dataset = Dataset.from_list([r.to_dict() for r in results])
-                        checkpoint_dataset.push_to_hub(config.target_dataset_hub)
+                        checkpoint_dataset.push_to_hub(dataset_config.target_dataset_hub)
                         logger.info("Checkpoint upload complete")
                 elif reprocess_item is not None:
                     work_queue.push(reprocess_item)
@@ -1032,12 +1091,38 @@ async def main() -> None:
         logger.error("No valid examples generated")
         return
 
+    rebalance_clean_examples(results, dataset_config, logger)
+
+    final_clean_count = sum(1 for result in results if not result.info.gold_comments)
+    logger.info(
+        "Generated %s examples (%s clean), merging with existing dataset",
+        len(results),
+        final_clean_count,
+    )
+
+    final_dataset = Dataset.from_list([record.to_dict() for record in results])
+
+    logger.info(
+        "Uploading dataset with %s total examples to %s",
+        len(final_dataset),
+        dataset_config.target_dataset_hub,
+    )
+    final_dataset.push_to_hub(dataset_config.target_dataset_hub)
+    logger.info("Upload complete")
+
+    if context.timer:
+        context.timer.log_summary("Overall timing summary")
+
+
+def rebalance_clean_examples(
+    results: list[ExampleRecord], dataset_config: DatasetConfig, event_logger: logging.Logger
+) -> None:
     existing_clean = sum(1 for result in results if not result.info.gold_comments)
-    target_clean = round(len(results) * config.no_comment_ratio)
+    target_clean = round(len(results) * dataset_config.no_comment_ratio)
 
     if existing_clean < target_clean:
         additional_needed = target_clean - existing_clean
-        logger.info("Converting %s additional examples to clean code examples", additional_needed)
+        event_logger.info("Converting %s additional examples to clean code examples", additional_needed)
 
         examples_with_comments = [i for i, result in enumerate(results) if result.info.gold_comments]
         if additional_needed <= len(examples_with_comments):
@@ -1054,7 +1139,7 @@ async def main() -> None:
 
     elif existing_clean > target_clean:
         excess_clean = existing_clean - target_clean
-        logger.info("Removing %s clean examples to maintain ratio", excess_clean)
+        event_logger.info("Removing %s clean examples to maintain ratio", excess_clean)
 
         clean_indices = [i for i, result in enumerate(results) if not result.info.gold_comments]
         indices_to_remove = random.sample(clean_indices, excess_clean)
@@ -1063,27 +1148,7 @@ async def main() -> None:
             results.pop(idx)
 
     else:
-        logger.info("Already have %s clean examples (target: %s), ratio is correct", existing_clean, target_clean)
-
-    final_clean_count = sum(1 for result in results if not result.info.gold_comments)
-    logger.info(
-        "Generated %s examples (%s clean), merging with existing dataset",
-        len(results),
-        final_clean_count,
-    )
-
-    final_dataset = Dataset.from_list([record.to_dict() for record in results])
-
-    logger.info(
-        "Uploading dataset with %s total examples to %s",
-        len(final_dataset),
-        config.target_dataset_hub,
-    )
-    final_dataset.push_to_hub(config.target_dataset_hub)
-    logger.info("Upload complete")
-
-    if context.timer:
-        context.timer.log_summary("Overall timing summary")
+        event_logger.info("Already have %s clean examples (target: %s), ratio is correct", existing_clean, target_clean)
 
 
 if __name__ == "__main__":

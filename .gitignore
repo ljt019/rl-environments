@@ -3,4 +3,5 @@
 *.pyc
 *.cypython
 .env
-./verifiers/*
+verifiers/
+.cursor/

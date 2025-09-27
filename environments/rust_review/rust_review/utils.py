@@ -1,5 +1,5 @@
 import httpx
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 CODER_SYSTEM_PROMPT = """
 You are a code editor that applies ONLY the specific changes mentioned in review comments. You must:
@@ -29,7 +29,7 @@ IMPORTANT: Apply only the exact changes mentioned in the review comments above. 
 """
 
 
-def get_code_from_applied_comments(model, client, completion, state):
+async def get_code_from_applied_comments(model, client, completion, state):
     print("[RUST_REVIEW] get_code_from_applied_comments: start")
     """
     Lazy generation - only runs once per rollout.
@@ -72,7 +72,7 @@ def get_code_from_applied_comments(model, client, completion, state):
         print(f"[DEBUG] Applying {len(comments)} review comments to code...")
         print(f"[RUST_REVIEW] get_code_from_applied_comments: requesting model={model} comments={len(comments)}")
 
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model,  # You can make this configurable
             messages=[
                 {"role": "system", "content": CODER_SYSTEM_PROMPT},
@@ -172,8 +172,13 @@ def setup_client(
 ):
     timeout_obj = httpx.Timeout(timeout, connect=5.0)
     limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive_connections)
-    http_client = httpx.Client(limits=limits, timeout=timeout_obj)
-    client = OpenAI(base_url=api_base_url, api_key=api_key, max_retries=max_retries, http_client=http_client)
+    http_client = httpx.AsyncClient(limits=limits, timeout=timeout_obj)
+    client = AsyncOpenAI(
+        base_url=api_base_url,
+        api_key=api_key,
+        max_retries=max_retries,
+        http_client=http_client,
+    )
     # Trigger lazy loading of SentenceTransformer to avoid deadlock later
     return client
 

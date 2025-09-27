@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 
@@ -96,6 +97,9 @@ def load_environment(
 
     def _get_st_model():
         print("[RUST_REVIEW] _get_st_model: entered")
+        print(
+            "[RUST_REVIEW] ensure this environment runs on the host where all-MiniLM-L6-v2 is cached; otherwise encoding will block"
+        )
         from sentence_transformers import SentenceTransformer
 
         with _st_lock:
@@ -108,7 +112,7 @@ def load_environment(
                 print("[RUST_REVIEW] _get_st_model: reusing cached model")
             return _st_model["model"]
 
-    def _safe_encode(texts):
+    async def _safe_encode(texts):
         import numpy as np
 
         print(f"[RUST_REVIEW] _safe_encode: called with {len(texts)} texts")
@@ -116,7 +120,8 @@ def load_environment(
         print(f"[RUST_REVIEW] _safe_encode: model device={model.device}")
         try:
             print("[RUST_REVIEW] _safe_encode: invoking model.encode")
-            emb = model.encode(
+            emb = await asyncio.to_thread(
+                model.encode,
                 texts,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
@@ -134,7 +139,8 @@ def load_environment(
                 model = _st_model["model"]
             try:
                 print("[RUST_REVIEW] _safe_encode: retrying encode")
-                emb = model.encode(
+                emb = await asyncio.to_thread(
+                    model.encode,
                     texts,
                     normalize_embeddings=True,
                     convert_to_numpy=True,
@@ -147,7 +153,7 @@ def load_environment(
                 print(f"[RUST_REVIEW] _safe_encode: retry failed with {exc_retry}")
                 return None
 
-    def semantic_similarity_reward(completion, **kwargs):
+    async def semantic_similarity_reward(completion, **kwargs):
         print("[RUST_REVIEW] semantic_similarity_reward: start")
         print(f"[RUST_REVIEW] semantic_similarity_reward: kwargs keys={list(kwargs.keys())}")
         state = kwargs["state"]
@@ -170,10 +176,10 @@ def load_environment(
             return 0.0
 
         print("[RUST_REVIEW] semantic_similarity_reward: calling _safe_encode for pred")
-        pred_emb = _safe_encode(pred_comments)
+        pred_emb = await _safe_encode(pred_comments)
         print("[RUST_REVIEW] semantic_similarity_reward: _safe_encode pred returned")
         print("[RUST_REVIEW] semantic_similarity_reward: calling _safe_encode for gold")
-        gold_emb = _safe_encode(gold_comments)
+        gold_emb = await _safe_encode(gold_comments)
         print("[RUST_REVIEW] semantic_similarity_reward: _safe_encode gold returned")
         print(
             f"[RUST_REVIEW] semantic_similarity_reward: pred_emb type={type(pred_emb)}, gold_emb type={type(gold_emb)}"
@@ -201,7 +207,7 @@ def load_environment(
         print(f"[RUST_REVIEW] semantic_similarity_reward: precision={precision} recall={recall} score={score}")
         return max(0.0, min(1.0, score))
 
-    def crystalbleu_reward(completion, **kwargs):
+    async def crystalbleu_reward(completion, **kwargs):
         print("[RUST_REVIEW] crystalbleu_reward: start")
         """CoRAL-style reward: Compare refined code with ground truth using CrystalBLEU"""
         import re
@@ -210,7 +216,7 @@ def load_environment(
         from .crystalbleu_local import corpus_bleu
 
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(
+        refined_code = await get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
         print(
@@ -273,11 +279,11 @@ def load_environment(
         print(f"[RUST_REVIEW] crystalbleu_reward: returning {result}")
         return result
 
-    def cargo_build_reward(completion, **kwargs):
+    async def cargo_build_reward(completion, **kwargs):
         print("[RUST_REVIEW] cargo_build_reward: start")
         """Reward for successful compilation after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(
+        refined_code = await get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
         print(
@@ -287,15 +293,16 @@ def load_environment(
         )
         if not refined_code:
             return 0.0
-        result = 1.0 if run_cargo_build(refined_code) else 0.0
+        success = await asyncio.to_thread(run_cargo_build, refined_code)
+        result = 1.0 if success else 0.0
         print(f"[RUST_REVIEW] cargo_build_reward: returning {result}")
         return result
 
-    def cargo_test_reward(completion, **kwargs):
+    async def cargo_test_reward(completion, **kwargs):
         print("[RUST_REVIEW] cargo_test_reward: start")
         """Reward for tests passing after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(
+        refined_code = await get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
         print(
@@ -305,15 +312,16 @@ def load_environment(
         )
         if not refined_code:
             return 0.0
-        result = 1.0 if run_cargo_tests(refined_code) else 0.0
+        success = await asyncio.to_thread(run_cargo_tests, refined_code)
+        result = 1.0 if success else 0.0
         print(f"[RUST_REVIEW] cargo_test_reward: returning {result}")
         return result
 
-    def cargo_clippy_reward(completion, **kwargs):
+    async def cargo_clippy_reward(completion, **kwargs):
         print("[RUST_REVIEW] cargo_clippy_reward: start")
         """Reward for fewer clippy warnings after applying review comments"""
         state = kwargs["state"]
-        refined_code = get_code_from_applied_comments(
+        refined_code = await get_code_from_applied_comments(
             review_applicator_model, review_applicator_client, completion, state
         )
         print(
@@ -323,7 +331,8 @@ def load_environment(
         )
         if not refined_code:
             return 0.0
-        result = 1.0 if run_cargo_clippy(refined_code) else 0.0
+        success = await asyncio.to_thread(run_cargo_clippy, refined_code)
+        result = 1.0 if success else 0.0
         print(f"[RUST_REVIEW] cargo_clippy_reward: returning {result}")
         return result
 
