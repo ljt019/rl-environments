@@ -385,6 +385,8 @@ def load_environment(
             return 0.0
 
         success, diagnostics = await _asyncio.to_thread(run_cargo_command, "build", refined_code)
+        cargo_cache = state.setdefault("_cargo_runs", {})
+        cargo_cache["build"] = (success, diagnostics)
         baseline = await _get_baseline_diagnostics("build", state)
         if success and not diagnostics:
             return 1.0
@@ -402,7 +404,14 @@ def load_environment(
         if not refined_code:
             return 0.0
 
+        cargo_cache = state.setdefault("_cargo_runs", {})
+        build_run = cargo_cache.get("build")
+        if build_run is not None:
+            build_success, build_diagnostics = build_run
+            if not build_success:
+                return 0.0
         success, diagnostics = await _asyncio.to_thread(run_cargo_command, "test", refined_code)
+        cargo_cache["test"] = (success, diagnostics)
         baseline = await _get_baseline_diagnostics("test", state)
         if success and not diagnostics:
             return 1.0
@@ -421,6 +430,8 @@ def load_environment(
             return 0.0
 
         success, diagnostics = await _asyncio.to_thread(run_cargo_command, "clippy", refined_code)
+        cargo_cache = state.setdefault("_cargo_runs", {})
+        cargo_cache["clippy"] = (success, diagnostics)
         baseline = await _get_baseline_diagnostics("clippy", state)
         if success and not diagnostics:
             return 1.0

@@ -295,6 +295,7 @@ def _parse_cargo_test_output(stdout: str, stderr: str) -> list[str]:
 
     diagnostics: list[str] = []
     combined = "\n".join([stdout or "", stderr or ""]).splitlines()
+    seen: set[str] = set()
     for line in combined:
         line = line.strip()
         if not line:
@@ -302,5 +303,34 @@ def _parse_cargo_test_output(stdout: str, stderr: str) -> list[str]:
         if "panicked at" in line:
             location_match = re.search(r"panicked at ([^:]+:\d+:\d+)", line)
             location = location_match.group(1) if location_match else ""
-            diagnostics.append(f"[test_failure] error {location} {line}")
+            diag = f"[test_failure] panic {location} {line}".strip()
+            if diag not in seen:
+                diagnostics.append(diag)
+                seen.add(diag)
+            continue
+
+        match = re.search(r"\b(error|warning)(\[[A-Z0-9]+\])?:\s*(.*)", line)
+        if match:
+            level = match.group(1).lower()
+            code = match.group(2) or ""
+            message = match.group(3) or ""
+            diag = f"[{level}{code}] {message}".strip()
+            if diag not in seen:
+                diagnostics.append(diag)
+                seen.add(diag)
+            continue
+
+        if line.lower().startswith("error"):
+            diag = f"[error] {line}".strip()
+            if diag not in seen:
+                diagnostics.append(diag)
+                seen.add(diag)
+        elif line.lower().startswith("warning"):
+            diag = f"[warning] {line}".strip()
+            if diag not in seen:
+                diagnostics.append(diag)
+                seen.add(diag)
+
+    if not diagnostics and any("error" in ln.lower() for ln in combined):
+        diagnostics.append("[test_failure] error nonzero exit")
     return diagnostics
