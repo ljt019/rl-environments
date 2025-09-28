@@ -6,11 +6,16 @@ import threading
 import numpy as np
 import torch
 from datasets import load_dataset
+from optimum.onnxruntime import ORTModelForFeatureExtraction
+from transformers import AutoTokenizer
 
 import verifiers as vf
 
 from .custom_parser import CustomParser
 from .utils import get_code_from_applied_comments, run_cargo_command, setup_client
+
+ONNX_EMBED_MODEL = "EmbeddedLLM/all-MiniLM-L6-v2-onnx-o3-cpu"
+ONNX_PROVIDER = "CPUExecutionProvider"
 
 SYSTEM_PROMPT = """
 You are an expert code reviewer. You will be given code to review and should provide constructive feedback.
@@ -80,13 +85,20 @@ def load_environment(
     _encode_lock_holder = {"lock": None}
     _encode_lock_init_lock = threading.Lock()
 
-    def _get_st_model(force_cpu: bool = False):
-        from sentence_transformers import SentenceTransformer
+    _encoder_lock = threading.Lock()
+    _encoder_model = {"model": None}
+    _encoder_tokenizer = {"tokenizer": None}
 
-        with _st_lock:
-            if force_cpu or _st_model["model"] is None:
-                _st_model["model"] = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-            return _st_model["model"]
+    def _get_st_model():
+        # force_cpu kept for API compatibility, ONNX model is CPU-only here
+        with _encoder_lock:
+            if _encoder_model["model"] is None:
+                _encoder_tokenizer["tokenizer"] = AutoTokenizer.from_pretrained(ONNX_EMBED_MODEL)
+                _encoder_model["model"] = ORTModelForFeatureExtraction.from_pretrained(
+                    ONNX_EMBED_MODEL,
+                    provider=ONNX_PROVIDER,
+                )
+            return _encoder_model["model"], _encoder_tokenizer["tokenizer"]
 
     def _log_encode_failure(stage: str, exc: Exception):
         print(f"[_safe_encode] {stage} failed with {exc}")
@@ -98,31 +110,27 @@ def load_environment(
             return _encode_lock_holder["lock"]
 
     async def _safe_encode(texts):
-        async def _encode(model):
-            emb = await asyncio.to_thread(
-                model.encode,
+        async def _encode(model, tokenizer):
+            inputs = tokenizer(
                 texts,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                batch_size=32,
-                show_progress_bar=False,
+                padding=True,
+                truncation=True,
+                return_tensors="np",
+                max_length=getattr(model.config, "max_position_embeddings", 512),
             )
-            emb_array = np.atleast_2d(emb)
-            return np.array(emb_array, dtype=np.float32, copy=True)
+            # Run ONNX model in background thread
+            outputs = await asyncio.to_thread(model, **inputs)
+            token_embeddings = outputs.last_hidden_state
+            # Attention mask for pooling
+            att_mask = inputs["attention_mask"][..., None].astype(np.float32)
+            pooled = (token_embeddings * att_mask).sum(axis=1) / np.clip(att_mask.sum(axis=1), 1e-9, None)
+            # Normalize to unit length
+            norms = np.linalg.norm(pooled, axis=1, keepdims=True)
+            normalized = pooled / np.clip(norms, 1e-9, None)
+            return normalized.astype(np.float32)
 
-        model = _get_st_model()
-        encode_lock = _get_encode_lock()
-        async with encode_lock:
-            try:
-                return await _encode(model)
-            except Exception as exc:
-                _log_encode_failure("initial encode", exc)
-                model = _get_st_model(force_cpu=True)
-                try:
-                    return await _encode(model)
-                except Exception as exc_retry:
-                    _log_encode_failure("retry", exc_retry)
-                    return None
+        model, tokenizer = _get_st_model()
+        return await _encode(model, tokenizer)
 
     def _normalize_comments(raw_comments):
         return [
