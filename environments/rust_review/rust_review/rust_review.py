@@ -133,17 +133,19 @@ def load_environment(
     def _simple_ngrams(tokens, n):
         return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
 
-    def _tokenize_rust_code(code):
-        """Tokenize Rust code for CrystalBLEU comparisons."""
+    def _tokenize_rust_code(code: str) -> list[str]:
+        """Tokenize Rust source for CrystalBLEU comparisons."""
         code = re.sub(r"//.*?\n", " ", code)
         code = re.sub(r"/\*.*?\*/", " ", code, flags=re.DOTALL)
         code = re.sub(r'"[^"]*"', "STRING", code)
         code = re.sub(r"'[^']*'", "CHAR", code)
-
         tokens = re.findall(r"\w+|[{}();,\.\[\]<>!=&|+-/*%^~]", code)
         return [token.lower() for token in tokens if token.strip()]
 
     async def semantic_similarity_reward(completion, **kwargs) -> int | float:
+        """
+        Calculate semantic similarity between predicted and gold comments using sentence embeddings.
+        """
         state = kwargs["state"]
         pred_comments = _normalize_comments(parser.parse_answer(completion))
         gold_comments = _normalize_comments(state.get("info", {}).get("gold_comments", []))
@@ -188,8 +190,8 @@ def load_environment(
             getattr(sim, "shape", None),
         )
 
-        precision = sim.max(axis=1).mean().item()
-        recall = sim.max(axis=0).mean().item()
+        precision = float(sim.max(axis=1).mean())
+        recall = float(sim.max(axis=0).mean())
 
         score = (precision + recall) / 2.0
         score = max(0.0, min(1.0, score))
