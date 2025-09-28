@@ -106,7 +106,6 @@ def load_environment(
                 show_progress_bar=False,
             )
             emb_array = np.atleast_2d(emb)
-            # Sanitize to ensure no torch tensors/metadata remain
             return np.array(emb_array, dtype=np.float32, copy=True)
 
         model = _get_st_model()
