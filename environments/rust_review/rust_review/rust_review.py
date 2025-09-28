@@ -148,8 +148,12 @@ def load_environment(
         if torch is not None and isinstance(obj, torch.Tensor):
             obj = obj.detach().cpu()
             return obj.item() if obj.ndim == 0 else obj.tolist()
+        if torch is not None and isinstance(obj, torch.Size):
+            return list(obj)
         if isinstance(obj, np.ndarray):
             return obj.item() if obj.ndim == 0 else obj.tolist()
+        if isinstance(obj, np.generic):
+            return obj.item()
         if isinstance(obj, dict):
             return {key: _to_builtin(value) for key, value in obj.items()}
         if isinstance(obj, list):
@@ -157,6 +161,9 @@ def load_environment(
         if isinstance(obj, tuple):
             return tuple(_to_builtin(value) for value in obj)
         return obj
+
+    def sanitize_for_broadcast(obj):
+        return _to_builtin(obj)
 
     async def semantic_similarity_reward(completion, **kwargs) -> int | float:
         """
