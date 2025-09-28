@@ -162,25 +162,6 @@ def load_environment(
             return tuple(_to_builtin(value) for value in obj)
         return obj
 
-    def _contains_symint(obj):
-        type_name = type(obj).__name__
-        if type_name in {"SymInt", "SymIntNode", "SymFloat"}:
-            return True
-        if isinstance(obj, dict):
-            return any(_contains_symint(v) for v in obj.values())
-        if isinstance(obj, (list, tuple, set)):
-            return any(_contains_symint(v) for v in obj)
-        return False
-
-    def _summarize_structure(obj):
-        if isinstance(obj, dict):
-            return {k: _summarize_structure(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return f"list(len={len(obj)}, type={type(obj[0]).__name__ if obj else 'empty'})"
-        if isinstance(obj, tuple):
-            return f"tuple(len={len(obj)})"
-        return type(obj).__name__
-
     def sanitize_for_broadcast(obj):
         return _to_builtin(obj)
 
