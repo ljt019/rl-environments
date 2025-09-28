@@ -1,10 +1,3 @@
-"""
-Minimal CrystalBLEU implementation without external NLTK or fractions.Fraction
-dependencies. Provides a corpus_bleu function compatible with the usage in
-rust_review.rust_review.crystalbleu_reward, including support for an `ignoring`
-set of n-grams.
-"""
-
 import math
 import sys
 from collections import Counter
