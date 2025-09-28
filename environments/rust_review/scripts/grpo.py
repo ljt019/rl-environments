@@ -6,7 +6,7 @@ from environments.rust_review.rust_review import load_environment
 ############## Training Config ##############
 
 MODEL_NAME = "ljt019/Qwen2.5-Coder-7B-rust-review"
-REVIEW_APPLICATOR_MODEL = "openai/gpt-4.1-nano"
+REVIEW_APPLICATOR_MODEL = "qwen/qwen3-coder-30b-a3b-instruct"
 
 RUN_NAME = "rust-review-grpo-7b"
 
@@ -31,4 +31,4 @@ trainer = vf.GRPOTrainer(
     args=args,
 )
 
-trainer.train(resume_from_checkpoint=True)
+trainer.train(resume_from_checkpoint=False)
