@@ -4,6 +4,7 @@ import re
 import threading
 
 import numpy as np
+import torch
 from datasets import load_dataset
 
 import verifiers as vf
@@ -142,6 +143,21 @@ def load_environment(
         tokens = re.findall(r"\w+|[{}();,\.\[\]<>!=&|+-/*%^~]", code)
         return [token.lower() for token in tokens if token.strip()]
 
+    def _to_builtin(obj):
+        """Recursively convert tensors/arrays to plain Python types."""
+        if torch is not None and isinstance(obj, torch.Tensor):
+            obj = obj.detach().cpu()
+            return obj.item() if obj.ndim == 0 else obj.tolist()
+        if isinstance(obj, np.ndarray):
+            return obj.item() if obj.ndim == 0 else obj.tolist()
+        if isinstance(obj, dict):
+            return {key: _to_builtin(value) for key, value in obj.items()}
+        if isinstance(obj, list):
+            return [_to_builtin(value) for value in obj]
+        if isinstance(obj, tuple):
+            return tuple(_to_builtin(value) for value in obj)
+        return obj
+
     async def semantic_similarity_reward(completion, **kwargs) -> int | float:
         """
         Calculate semantic similarity between predicted and gold comments using sentence embeddings.
@@ -163,32 +179,7 @@ def load_environment(
             print("[semantic_similarity_reward] returning 0.0 (encode failed)")
             return 0.0
 
-        print(
-            "[semantic_similarity_reward] pred_emb type",
-            type(pred_emb),
-            "dtype",
-            getattr(pred_emb, "dtype", None),
-            "shape",
-            getattr(pred_emb, "shape", None),
-        )
-        print(
-            "[semantic_similarity_reward] gold_emb type",
-            type(gold_emb),
-            "dtype",
-            getattr(gold_emb, "dtype", None),
-            "shape",
-            getattr(gold_emb, "shape", None),
-        )
-
         sim = np.asarray(pred_emb @ gold_emb.T, dtype=np.float32)
-        print(
-            "[semantic_similarity_reward] sim type",
-            type(sim),
-            "dtype",
-            getattr(sim, "dtype", None),
-            "shape",
-            getattr(sim, "shape", None),
-        )
 
         precision = float(sim.max(axis=1).mean())
         recall = float(sim.max(axis=0).mean())
