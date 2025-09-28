@@ -35,7 +35,7 @@ model, tokenizer = vf.get_model_and_tokenizer(MODEL_NAME)
 
 args = vf.grpo_defaults(run_name=RUN_NAME)
 args.max_steps = 2500
-args.save_steps = 1
+args.save_steps = 25
 args.save_only_model = False
 args.push_to_hub = True
 args.hub_model_id = "ljt019/Qwen2.5-Coder-7B-rust-review"
