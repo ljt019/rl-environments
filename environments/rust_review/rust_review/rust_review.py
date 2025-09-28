@@ -12,7 +12,12 @@ from transformers import AutoTokenizer
 import verifiers as vf
 
 from .custom_parser import CustomParser
-from .utils import get_code_from_applied_comments, run_cargo_command, setup_client
+from .utils import (
+    extract_rust_code_from_state,
+    get_code_from_applied_comments,
+    run_cargo_command,
+    setup_client,
+)
 
 ONNX_EMBED_MODEL = "EmbeddedLLM/all-MiniLM-L6-v2-onnx-o3-cpu"
 ONNX_PROVIDER = "CPUExecutionProvider"
@@ -24,6 +29,7 @@ Format your response as follows:
 {format_str}
 
 Focus on the most important issues first. Be constructive and educational.
+Ground every comment in concrete code snippets from the actual submission.
 """
 
 DATASET_NAME_DEFAULT = "ljt019/rust-review-singleturn-3250"
@@ -69,16 +75,145 @@ def load_environment(
 
     parser = CustomParser()
 
-    def minimum_issues_found_reward(completion, **kwargs):
-        """Reward 1.0 when at least the expected number of issues are flagged."""
-        state = kwargs["state"]
-        gold_comments = state.get("info", {}).get("gold_comments", [])
-        comment_count = len(parser.parse_answer(completion) or [])
-        expected_issues = len(gold_comments)
+    def _normalize_comments(raw_comments):
+        return [
+            str(comment).strip()
+            for comment in (raw_comments or [])
+            if isinstance(comment, str) and str(comment).strip()
+        ]
 
-        if expected_issues == 0:
-            return 1.0 if comment_count == 0 else 0.0
-        return 1.0 if comment_count >= expected_issues else 0.0
+    def _diagnostic_key(diag: str) -> str:
+        return re.sub(r"\s+", " ", str(diag).strip()).lower()
+
+    def _score_diagnostics(baseline: list[str], current: list[str]) -> float:
+        baseline_set = {key for key in (_diagnostic_key(d) for d in baseline) if key}
+        current_set = {key for key in (_diagnostic_key(d) for d in current) if key}
+
+        if not baseline_set and not current_set:
+            return 1.0
+        if not baseline_set:
+            # Penalize new diagnostics proportional to their count
+            return max(0.0, 1.0 - 0.25 * len(current_set))
+
+        resolved = baseline_set - current_set
+        remaining = baseline_set & current_set
+        new_issues = current_set - baseline_set
+
+        resolved_ratio = len(resolved) / max(len(baseline_set), 1)
+        remaining_ratio = len(remaining) / max(len(baseline_set), 1)
+        new_ratio = len(new_issues) / max(len(current_set), 1) if current_set else 0.0
+
+        reward = resolved_ratio
+        reward -= 0.6 * remaining_ratio
+        reward -= 0.9 * new_ratio
+        return float(max(0.0, min(1.0, reward)))
+
+    async def _get_baseline_diagnostics(command: str, state) -> list[str]:
+        cache = state.setdefault("_cargo_baseline", {})
+        if command in cache:
+            return cache[command]
+
+        original_code = state.get("original_code") or extract_rust_code_from_state(state)
+        if not original_code:
+            cache[command] = []
+            return cache[command]
+
+        import asyncio as _asyncio
+
+        _, diagnostics = await _asyncio.to_thread(run_cargo_command, command, original_code)
+        cache[command] = diagnostics
+        return diagnostics
+
+    async def _encode_texts(texts: list[str]) -> np.ndarray | None:
+        if not texts:
+            return None
+        return await _safe_encode(texts)
+
+    def _cosine_similarity_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        if a.size == 0 or b.size == 0:
+            return np.zeros((len(a), len(b)), dtype=np.float32)
+        return np.asarray(a @ b.T, dtype=np.float32)
+
+    def _match_comments(sim_matrix: np.ndarray, threshold: float = 0.65) -> set[tuple[int, int]]:
+        matches = set()
+        if sim_matrix.size == 0:
+            return matches
+
+        used_rows: set[int] = set()
+        used_cols: set[int] = set()
+
+        flat_indices = np.argsort(sim_matrix, axis=None)[::-1]
+        rows, cols = sim_matrix.shape
+        for idx in flat_indices:
+            r = idx // cols
+            c = idx % cols
+            if r in used_rows or c in used_cols:
+                continue
+            if sim_matrix[r, c] < threshold:
+                break
+            matches.add((r, c))
+            used_rows.add(r)
+            used_cols.add(c)
+        return matches
+
+    def _extract_identifiers(comment: str) -> set[str]:
+        code_spans = re.findall(r"`([^`]+)`", comment)
+        words = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", comment)
+        return {token for token in (*code_spans, *words) if len(token) > 2}
+
+    def _ground_comment(comment: str, original_code: str) -> bool:
+        if not original_code:
+            return False
+        identifiers = _extract_identifiers(comment)
+        if not identifiers:
+            # fallback: ensure comment length and mentions exist
+            return True
+        lowered_code = original_code.lower()
+        for identifier in identifiers:
+            if identifier.lower() in lowered_code:
+                return True
+        return False
+
+    async def comment_alignment_reward(completion, **kwargs):
+        state = kwargs["state"]
+        gold_comments = _normalize_comments(state.get("info", {}).get("gold_comments", []))
+        pred_comments = _normalize_comments(parser.parse_answer(completion))
+
+        if not gold_comments and not pred_comments:
+            return 1.0
+        if not pred_comments:
+            return 0.0
+
+        gold_emb = await _encode_texts(gold_comments)
+        pred_emb = await _encode_texts(pred_comments)
+
+        if gold_emb is None or pred_emb is None:
+            return 0.0
+
+        sim_matrix = _cosine_similarity_matrix(pred_emb, gold_emb)
+        matches = _match_comments(sim_matrix)
+
+        original_code = extract_rust_code_from_state(state) or ""
+
+        grounded_matches = set()
+        for pred_idx, gold_idx in matches:
+            comment = pred_comments[pred_idx]
+            if _ground_comment(comment, original_code):
+                grounded_matches.add((pred_idx, gold_idx))
+
+        true_positives = len(grounded_matches)
+        false_positives = len(pred_comments) - true_positives
+
+        if true_positives == 0:
+            penalty = max(0.0, false_positives / max(len(pred_comments), 1))
+            return max(0.0, 0.0 - 0.2 * penalty)
+
+        precision = true_positives / len(pred_comments)
+        recall = true_positives / max(len(gold_comments), 1)
+        f1 = (2 * precision * recall) / (precision + recall) if precision + recall > 0 else 0.0
+
+        penalty = 0.2 * (false_positives / max(len(pred_comments), 1))
+        return max(0.0, f1 - penalty)
 
     _st_lock = threading.Lock()
     _st_model = {"model": None}
@@ -131,13 +266,6 @@ def load_environment(
 
         model, tokenizer = _get_st_model()
         return await _encode(model, tokenizer)
-
-    def _normalize_comments(raw_comments):
-        return [
-            str(comment).strip()
-            for comment in (raw_comments or [])
-            if isinstance(comment, str) and str(comment).strip()
-        ]
 
     def _simple_ngrams(tokens, n):
         return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
@@ -256,8 +384,11 @@ def load_environment(
         if not refined_code:
             return 0.0
 
-        success = await _asyncio.to_thread(run_cargo_command, "build", refined_code)
-        return 1.0 if success else 0.0
+        success, diagnostics = await _asyncio.to_thread(run_cargo_command, "build", refined_code)
+        baseline = await _get_baseline_diagnostics("build", state)
+        if success and not diagnostics:
+            return 1.0
+        return _score_diagnostics(baseline, diagnostics)
 
     async def cargo_test_reward(completion, **kwargs):
         """Reward for tests passing after applying review comments."""
@@ -271,8 +402,11 @@ def load_environment(
         if not refined_code:
             return 0.0
 
-        success = await _asyncio.to_thread(run_cargo_command, "test", refined_code)
-        return 1.0 if success else 0.0
+        success, diagnostics = await _asyncio.to_thread(run_cargo_command, "test", refined_code)
+        baseline = await _get_baseline_diagnostics("test", state)
+        if success and not diagnostics:
+            return 1.0
+        return _score_diagnostics(baseline, diagnostics)
 
     async def cargo_clippy_reward(completion, **kwargs):
         """Reward for fewer clippy warnings after applying review comments."""
@@ -286,8 +420,11 @@ def load_environment(
         if not refined_code:
             return 0.0
 
-        success = await _asyncio.to_thread(run_cargo_command, "clippy", refined_code)
-        return 1.0 if success else 0.0
+        success, diagnostics = await _asyncio.to_thread(run_cargo_command, "clippy", refined_code)
+        baseline = await _get_baseline_diagnostics("clippy", state)
+        if success and not diagnostics:
+            return 1.0
+        return _score_diagnostics(baseline, diagnostics)
 
     rubric = vf.Rubric(
         funcs=[
@@ -296,10 +433,10 @@ def load_environment(
             cargo_test_reward,
             cargo_clippy_reward,
             semantic_similarity_reward,
-            minimum_issues_found_reward,
+            comment_alignment_reward,
             parser.get_format_reward_func(),
         ],
-        weights=[0.35, 0.15, 0.15, 0.05, 0.20, 0.07, 0.03],
+        weights=[0.30, 0.15, 0.15, 0.05, 0.15, 0.17, 0.03],
         parser=parser,
     )
 

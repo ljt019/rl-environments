@@ -1,3 +1,9 @@
+import json
+import os
+import shutil
+import subprocess
+from shutil import which
+
 import httpx
 from openai import AsyncOpenAI
 
@@ -11,11 +17,11 @@ CRITICAL RULES:
 2. Do NOT make any additional improvements, optimizations, or fixes beyond what's explicitly mentioned
 3. Do NOT add new functionality, change variable names, or restructure code unless specifically requested
 4. Do NOT fix other issues you might notice - only address the exact feedback given
-5. If a comment is unclear or impossible to implement, leave that part of the code unchanged
+5. If a comment is unclear or impossible to implement, leave that part of the code unchanged and return the original code.
 
 Your job is to be a precise code editor, not a code improver. Apply the minimum changes necessary to address the specific feedback.
 
-Return ONLY the modified Rust code in a single ```rust code block. Do not include explanations.
+Preserve existing formatting unless changes are explicitly requested. Return ONLY the modified Rust code in a single ```rust code block. Do not include explanations.
 """
 
 REVIEW_APPLICATOR_MODEL_PROMPT = """
@@ -172,12 +178,8 @@ def _setup_rust_project(code: str) -> str:
     return project_dir
 
 
-def run_cargo_command(command: str, code: str) -> bool:
-    """Runs a cargo command and returns success status."""
-    import os
-    import shutil
-    import subprocess
-    from shutil import which
+def run_cargo_command(command: str, code: str) -> tuple[bool, list[str]]:
+    """Runs a cargo command and returns success along with normalized diagnostics."""
 
     project_dir = _setup_rust_project(code)
 
@@ -187,18 +189,37 @@ def run_cargo_command(command: str, code: str) -> bool:
         if which("cargo", path=env.get("PATH")) is None:
             raise FileNotFoundError("cargo not found on PATH. Ensure Rust is installed and PATH is set.")
 
-        result = subprocess.run(
-            ["cargo", command, "--quiet"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-        )
+        diagnostics: list[str] = []
+
+        if command == "test":
+            result = subprocess.run(
+                ["cargo", "test", "--quiet"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+            diagnostics = _parse_cargo_test_output(stdout, stderr)
+        else:
+            result = subprocess.run(
+                ["cargo", command, "--message-format", "json"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+            stdout = result.stdout or ""
+            diagnostics = _parse_cargo_json_messages(stdout)
+
         success = result.returncode == 0
     except Exception as e:
         print(f"[run_cargo_command] error running cargo {command}: {e}")
         success = False
+        diagnostics = [f"[internal] error {e}"]
     finally:
         # Clean up outputs directory
         shutil.rmtree(project_dir, ignore_errors=True)
@@ -210,4 +231,76 @@ def run_cargo_command(command: str, code: str) -> bool:
         except OSError:
             pass
 
-    return success
+    return success, diagnostics
+
+
+def _parse_cargo_json_messages(stdout: str) -> list[str]:
+    diagnostics = []
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if obj.get("reason") != "compiler-message":
+            continue
+
+        msg = obj.get("message", {})
+        level = msg.get("level")
+
+        if level not in ("error", "warning"):
+            continue
+
+        code_obj = msg.get("code") or {}
+        code = code_obj.get("code") if code_obj.get("code") else level
+
+        spans = msg.get("spans", [])
+        location = None
+        if spans:
+            primary_span = next((s for s in spans if s.get("is_primary")), None)
+            if primary_span:
+                file_name = primary_span.get("file_name")
+                line_start = primary_span.get("line_start")
+                column_start = primary_span.get("column_start")
+                if all([file_name, line_start, column_start]):
+                    location = f"{file_name}:{line_start}:{column_start}"
+
+        message_text = msg.get("message", "").strip()
+
+        if location:
+            formatted_diag = f"[{code}] {level} {location} {message_text}".strip()
+        else:
+            formatted_diag = f"[{code}] {level} {message_text}".strip()
+
+        diagnostics.append(formatted_diag)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for diag in diagnostics:
+        key = diag.strip()
+        if key not in seen:
+            deduped.append(diag)
+            seen.add(key)
+
+    return deduped
+
+
+def _parse_cargo_test_output(stdout: str, stderr: str) -> list[str]:
+    import re
+
+    diagnostics: list[str] = []
+    combined = "\n".join([stdout or "", stderr or ""]).splitlines()
+    for line in combined:
+        line = line.strip()
+        if not line:
+            continue
+        if "panicked at" in line:
+            location_match = re.search(r"panicked at ([^:]+:\d+:\d+)", line)
+            location = location_match.group(1) if location_match else ""
+            diagnostics.append(f"[test_failure] error {location} {line}")
+    return diagnostics
