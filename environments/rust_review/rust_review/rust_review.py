@@ -142,7 +142,7 @@ def load_environment(
         tokens = re.findall(r"\w+|[{}();,\.\[\]<>!=&|+-/*%^~]", code)
         return [token.lower() for token in tokens if token.strip()]
 
-    async def semantic_similarity_reward(completion, **kwargs):
+    async def semantic_similarity_reward(completion, **kwargs) -> int | float:
         state = kwargs["state"]
         pred_comments = _normalize_comments(parser.parse_answer(completion))
         gold_comments = _normalize_comments(state.get("info", {}).get("gold_comments", []))
@@ -166,8 +166,8 @@ def load_environment(
         recall = float(sim.max(axis=0).mean())
 
         score = (precision + recall) / 2.0
-        score = float(score)
-        return max(0.0, min(1.0, score))
+        score = max(0.0, min(1.0, score))
+        return float(score)
 
     async def crystalbleu_reward(completion, **kwargs):
         """Compare refined code with ground truth using CrystalBLEU."""
