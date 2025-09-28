@@ -7,10 +7,12 @@ from environments.rust_review.rust_review import load_environment
 
 
 class PushToHubOnSaveCallback(TrainerCallback):
+    def __init__(self, trainer: vf.GRPOTrainer):
+        self.trainer = trainer
+
     def on_save(self, args, state, control, **kwargs):
-        trainer = kwargs["trainer"]
         if state.is_world_process_zero:
-            trainer.push_to_hub(
+            self.trainer.push_to_hub(
                 commit_message=f"checkpoint-{state.global_step}",
                 blocking=True,
                 max_shard_size="15GB",
@@ -44,6 +46,6 @@ trainer = vf.GRPOTrainer(
     args=args,
 )
 
-trainer.add_callback(PushToHubOnSaveCallback())
+trainer.add_callback(PushToHubOnSaveCallback(trainer))
 
 trainer.train()
