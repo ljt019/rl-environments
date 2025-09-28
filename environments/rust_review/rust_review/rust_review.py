@@ -4,8 +4,9 @@ import re
 import threading
 
 import numpy as np
-import verifiers as vf
 from datasets import load_dataset
+
+import verifiers as vf
 
 from .custom_parser import CustomParser
 from .utils import get_code_from_applied_comments, run_cargo_command, setup_client
@@ -160,7 +161,32 @@ def load_environment(
             print("[semantic_similarity_reward] returning 0.0 (encode failed)")
             return 0.0
 
-        sim = pred_emb @ gold_emb.T
+        print(
+            "[semantic_similarity_reward] pred_emb type",
+            type(pred_emb),
+            "dtype",
+            getattr(pred_emb, "dtype", None),
+            "shape",
+            getattr(pred_emb, "shape", None),
+        )
+        print(
+            "[semantic_similarity_reward] gold_emb type",
+            type(gold_emb),
+            "dtype",
+            getattr(gold_emb, "dtype", None),
+            "shape",
+            getattr(gold_emb, "shape", None),
+        )
+
+        sim = np.asarray(pred_emb @ gold_emb.T, dtype=np.float32)
+        print(
+            "[semantic_similarity_reward] sim type",
+            type(sim),
+            "dtype",
+            getattr(sim, "dtype", None),
+            "shape",
+            getattr(sim, "shape", None),
+        )
 
         precision = sim.max(axis=1).mean().item()
         recall = sim.max(axis=0).mean().item()
