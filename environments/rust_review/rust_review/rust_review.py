@@ -166,6 +166,7 @@ def load_environment(
         recall = float(sim.max(axis=0).mean())
 
         score = (precision + recall) / 2.0
+        score = float(score)
         return max(0.0, min(1.0, score))
 
     async def crystalbleu_reward(completion, **kwargs):
