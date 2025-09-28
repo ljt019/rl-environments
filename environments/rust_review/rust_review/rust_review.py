@@ -105,7 +105,9 @@ def load_environment(
                 batch_size=32,
                 show_progress_bar=False,
             )
-            return np.atleast_2d(emb)
+            emb_array = np.atleast_2d(emb)
+            # Sanitize to ensure no torch tensors/metadata remain
+            return np.array(emb_array, dtype=np.float32, copy=True)
 
         model = _get_st_model()
         encode_lock = _get_encode_lock()
