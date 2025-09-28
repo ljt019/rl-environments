@@ -4,9 +4,8 @@ import re
 import threading
 
 import numpy as np
-from datasets import load_dataset
-
 import verifiers as vf
+from datasets import load_dataset
 
 from .custom_parser import CustomParser
 from .utils import get_code_from_applied_comments, run_cargo_command, setup_client
@@ -162,12 +161,12 @@ def load_environment(
 
         sim = pred_emb @ gold_emb.T
 
-        precision = float(sim.max(axis=1).mean())
-        recall = float(sim.max(axis=0).mean())
+        precision = sim.max(axis=1).mean().item()
+        recall = sim.max(axis=0).mean().item()
 
         score = (precision + recall) / 2.0
         score = max(0.0, min(1.0, score))
-        return float(score)
+        return score
 
     async def crystalbleu_reward(completion, **kwargs):
         """Compare refined code with ground truth using CrystalBLEU."""
